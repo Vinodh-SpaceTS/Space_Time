@@ -1,0 +1,15 @@
+[project]
+name = "clock-sim"
+version = "0.1.0"
+description = "GNSSDO Synchronization and Clock Simulation Telemetry"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.30.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "allantools>=2019.9",
+    "filterpy>=1.4.5",
+    "hifitime>=4.3.0",
+]

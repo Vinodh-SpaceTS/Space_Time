@@ -1,0 +1,2 @@
+local_file,station,date_utc,format,source_agency,receiver,antenna,epochs,sample_interval_s,first_epoch_utc,first_obs_header_time,leap_seconds,validation_use
+data/ab041000.25o,AB04,2025-04-10,RINEX 2.11 mixed observation,UNAVCO,SEPT POLARX5 5.5.0,TRM59800.99 SCIT,5760,15,2025-04-09 23:59:42,2025-04-10 00:00:00 GPS,18,Historical constellation replay and GNSSDO live playback validation
