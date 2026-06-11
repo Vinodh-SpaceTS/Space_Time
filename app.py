@@ -124,7 +124,7 @@ sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'analys
 # Import functions from modules
 from clock_model import simulate_rubidium_clock, plot_rubidium_clock, plot_error_without_bias, plot_rubidium_random_walk, plot_rubidium_aging, plot_rubidium_distribution, plot_rubidium_frequency_wander
 from gnss_time_model import simulate_gnss_time, plot_gnss_time_components, plot_full_gnss_error, plot_gnss_component_breakdown
-from kalman_filter import run_kalman_filter_v2, plot_disciplined_clock_v2, plot_kalman_diagnostics_v2, plot_estimated_drift, plot_kalman_innovation, calculate_holdover_uncertainties, build_Q_matrix
+from kalman_filter import run_kalman_filter_v2, plot_disciplined_clock_v2, plot_kalman_diagnostics_v2, plot_estimated_drift, plot_kalman_innovation, calculate_holdover_uncertainties, build_Q_matrix, plot_dynamic_r_diagnostics, calculate_recovery_time
 from gnss_analysis import parse_rinex_file, plot_satellite_visibility, parse_rinex_metadata
 from analysis.allan_deviation import calculate_allan_deviation, plot_allan_deviation_comparison, allan_plot_lock
 from config import RINEX_FILEPATH, GLOBAL_RANDOM_SEED, validate_config
@@ -204,7 +204,9 @@ st.sidebar.header("Configuration")
 with st.sidebar.expander("Simulation Control", expanded=True):
     duration = st.sidebar.slider("Duration (s)", 1000, 20000, duration, 1000)
     dt = st.sidebar.slider("Time Step (s)", 1, 10, dt, 1)
+    target_accuracy_ns = st.sidebar.number_input("Target Accuracy (ns)", 5.0, 500.0, 50.0, 5.0, help="Target disciplined master clock error limit under active tracking.")
     auto_scale_y = st.sidebar.checkbox("Auto-scale Plot Y-Axis", value=False)
+
 
 with st.sidebar.expander("Atomic Standard Settings", expanded=False):
     rb_bias_ns = st.sidebar.number_input("Rubidium Initial Bias (ns)", 0.0, 5000000.0, rb_bias_ns, 50000.0)
@@ -316,14 +318,15 @@ def get_system_simulation(duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging,
     )
     kal_est, drift_est, kal_var, m_err, innov = kf_out
     diverged_flags = kf_out.diverged_flags
+    kalman_gains = kf_out.kalman_gains
     
     return (t, rb_err, rw, fw, ag_err, gnss_err, sat_err, prop_err, meas_ns,
-            kal_est, drift_est, kal_var, m_err, innov, diverged_flags)
+            kal_est, drift_est, kal_var, m_err, innov, diverged_flags, kalman_gains, R_profile)
 
 # Run or retrieve cached simulation
 true_time, rubidium_error, rb_rw, rb_freq_offset, rb_aging_error, \
 gnss_error, sat_clock_error, propagation_error, measurement_noise, \
-kalman_estimate, drift_estimates, kalman_variance, master_error, innovations, diverged_flags = get_system_simulation(
+kalman_estimate, drift_estimates, kalman_variance, master_error, innovations, diverged_flags, kalman_gains, R_profile = get_system_simulation(
     duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging,
     gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov,
     outage_enabled, outage_start, outage_end,
@@ -333,12 +336,13 @@ kalman_estimate, drift_estimates, kalman_variance, master_error, innovations, di
 # ====================================================
 # TABS SYSTEM
 # ====================================================
-tab_telemetry, tab_constellation, tab_diagnostics, tab_tuning, tab_allan, tab_playback = st.tabs([
+tab_telemetry, tab_constellation, tab_diagnostics, tab_tuning, tab_allan, tab_holdover, tab_playback = st.tabs([
     "Real-Time Telemetry & Diagnostics",
     "Constellation Analysis (RINEX)",
     "Signal Source Characterization",
     "Kalman Tuning",
     "Allan Deviation Analysis",
+    "Holdover Verification",
     "Live GNSSDO Playback"
 ])
 
@@ -361,28 +365,60 @@ with tab_telemetry:
         
     st.markdown("---")
     
+    # UTC Master Clock Card
+    idx_end = min(len(times_analysis) - 1, int(duration / dt))
+    epoch_end_dt = times_analysis[idx_end]
+    final_offset = master_error[-1]
+    final_utc_str = format_telemetry_time(epoch_end_dt, final_offset)
+    
+    st.markdown(f"""
+    <div class="telemetry-card" style="text-align: center; border-color: #e2e8f0; background-color: #f8fafc; margin-bottom: 20px;">
+        <div class="telemetry-header" style="color: #4f46e5; font-size: 1.1rem; border-bottom: none; margin-bottom: 0;">GNSSDO MASTER CLOCK (UTC)</div>
+        <div class="telemetry-value-large" style="font-size: 2.8rem; color: #1e1b4b; margin: 10px 0;">{final_utc_str}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Calculate performance scorecard metrics
+    if outage_enabled:
+        active_indices = (true_time < outage_start) | (true_time >= outage_end)
+    else:
+        active_indices = np.ones(len(true_time), dtype=bool)
+        
+    calibrated_gnss_error = gnss_error - gnss_bias
+    calibrated_master_error = master_error - gnss_bias
+    gnss_rms = np.sqrt(np.mean(calibrated_gnss_error[active_indices]**2)) * 1e9
+    rb_rms = np.sqrt(np.mean(rubidium_error[active_indices]**2)) * 1e9
+    master_rms = np.sqrt(np.mean(calibrated_master_error[active_indices]**2)) * 1e9
+    master_max = np.max(np.abs(calibrated_master_error[active_indices])) * 1e9
+    
+    passed_assessment = master_max < target_accuracy_ns
+    status_text = "PASS" if passed_assessment else "FAIL"
+    status_color = "#059669" if passed_assessment else "#dc2626"
+    
+    st.markdown("### Timing System Performance Scorecard")
+    cols_scorecard = st.columns([1, 1, 1, 1, 1.2])
+    with cols_scorecard[0]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value value-green">{gnss_rms:.1f} ns</div><div class="metric-label">GNSS RMS Error</div></div>', unsafe_allow_html=True)
+    with cols_scorecard[1]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value value-orange">{rb_rms/1e6:.2f} ms</div><div class="metric-label">Rubidium RMS Error</div></div>', unsafe_allow_html=True)
+    with cols_scorecard[2]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value value-blue">{master_rms:.2f} ns</div><div class="metric-label">Master RMS Error</div></div>', unsafe_allow_html=True)
+    with cols_scorecard[3]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value value-purple">{master_max:.2f} ns</div><div class="metric-label">Master Peak Error</div></div>', unsafe_allow_html=True)
+    with cols_scorecard[4]:
+        st.markdown(
+            f'<div class="metric-card" style="background-color: {status_color}10; border-color: {status_color}50;">'
+            f'<div class="metric-value" style="color: {status_color};">{status_text}</div>'
+            f'<div class="metric-label">Target: {target_accuracy_ns:.0f} ns</div></div>',
+            unsafe_allow_html=True
+        )
+        
+    st.markdown("---")
+    
     st.markdown("### Disciplined Master Clock Phase Error")
-    fig_m = plot_disciplined_clock_v2(true_time, gnss_error, master_error, outage_enabled, outage_start, outage_end, auto_scale=auto_scale_y)
+    fig_m = plot_disciplined_clock_v2(true_time, calibrated_gnss_error, calibrated_master_error, outage_enabled, outage_start, outage_end, auto_scale=auto_scale_y)
     st.pyplot(fig_m)
     plt.close(fig_m)
-    
-    st.markdown("---")
-    st.markdown("### Kalman Filter Diagnostics")
-    fig_kf = plot_kalman_diagnostics_v2(true_time, rubidium_error, kalman_estimate, kalman_variance, gnss_bias, outage_enabled, outage_start, outage_end)
-    st.pyplot(fig_kf)
-    plt.close(fig_kf)
-    
-    st.markdown("---")
-    st.markdown("### Estimated Frequency Drift")
-    fig_drift = plot_estimated_drift(true_time, drift_estimates)
-    st.pyplot(fig_drift)
-    plt.close(fig_drift)
-    
-    st.markdown("---")
-    st.markdown("### Kalman Filter Measurement Innovation")
-    fig_innov = plot_kalman_innovation(true_time, innovations, outage_enabled, outage_start, outage_end)
-    st.pyplot(fig_innov)
-    plt.close(fig_innov)
     
     st.markdown("---")
     st.markdown("### Performance Metrics")
@@ -656,11 +692,24 @@ with tab_tuning:
         
     st.markdown("---")
     
+    # Calculate R_val_t for the tuned filter
+    if dynamic_r_enabled and gnss_meas > 0:
+        R_val_t = R_profile * ((r_sigma_ns * 1e-9) / gnss_meas) ** 2
+        R_plot_t = R_val_t
+    else:
+        R_val_t = R_t
+        R_plot_t = np.full(len(true_time), R_t)
+        
     # Run the tuned Kalman filter
-    bias_est_t, drift_est_t, var_t, master_error_t, innovations_t = run_kalman_filter_v2(
+    kf_out_t = run_kalman_filter_v2(
         true_time, rubidium_error, gnss_error, outage_enabled, outage_start, outage_end,
-        Q_bias=Q_bias_t, Q_drift=Q_drift_t, R_val=R_t
+        Q_bias=Q_bias_t, Q_drift=Q_drift_t, R_val=R_val_t
     )
+    bias_est_t, drift_est_t, var_t, master_error_t, innovations_t = kf_out_t
+    kalman_gains_t = kf_out_t.kalman_gains
+    
+    # Calibrate tuned master error
+    calibrated_master_error_t = master_error_t - gnss_bias
     
     # Calculate local metrics
     if outage_enabled:
@@ -670,16 +719,19 @@ with tab_tuning:
         t_active_indices = np.ones(len(true_time), dtype=bool)
         t_outage_indices = np.zeros(len(true_time), dtype=bool)
         
-    t_std_active = np.std(master_error_t[t_active_indices]) * 1e9
-    t_mean_active = np.mean(master_error_t[t_active_indices]) * 1e9
+    t_std_active = np.std(calibrated_master_error_t[t_active_indices]) * 1e9
+    t_mean_active = np.mean(calibrated_master_error_t[t_active_indices]) * 1e9
     
-    t_std_overall = np.std(master_error_t) * 1e9
+    t_std_overall = np.std(calibrated_master_error_t) * 1e9
     
     # Error right at the end of the outage (t = OUTAGE_END s)
     idx_outage_end = int(outage_end / dt) if outage_enabled else 0
-    t_peak_err = master_error_t[idx_outage_end] * 1e9 if outage_enabled else 0.0
-    t_final_err = master_error_t[-1] * 1e9
+    t_peak_err = calibrated_master_error_t[idx_outage_end] * 1e9 if outage_enabled else 0.0
+    t_final_err = calibrated_master_error_t[-1] * 1e9
     
+    if np.any(kf_out_t.diverged_flags):
+        st.error("⚠️ **Tuned Kalman Filter Divergence Detected!** Innovations have grown unbounded. Adjust process noise or measurement noise to stabilize.")
+        
     # Performance summary metrics cards
     col_tm1, col_tm2, col_tm3 = st.columns(3)
     with col_tm1:
@@ -693,20 +745,32 @@ with tab_tuning:
         st.markdown(f'<div class="metric-card"><div class="metric-value value-purple">{t_final_err:.2f} ns</div><div class="metric-label">Final Error (t={duration}s)</div></div>', unsafe_allow_html=True)
             
     st.markdown("---")
+    st.markdown("### Tuned Filter Diagnostics")
     
     # Renders the live plots
     col_p1, col_p2 = st.columns(2)
     with col_p1:
-        st.markdown("#### Custom Disciplined Clock Error")
-        fig_m_t = plot_disciplined_clock_v2(true_time, gnss_error, master_error_t, outage_enabled, outage_start, outage_end, auto_scale=auto_scale_y)
-        st.pyplot(fig_m_t)
-        plt.close(fig_m_t)
-        
-    with col_p2:
-        st.markdown("#### Custom Filter Diagnostics")
-        fig_kf_t = plot_kalman_diagnostics_v2(true_time, rubidium_error, bias_est_t, var_t, gnss_bias, outage_enabled, outage_start, outage_end)
+        st.markdown("#### Custom Kalman Filter Diagnostics")
+        fig_kf_t = plot_kalman_diagnostics_v2(
+            true_time, rubidium_error, bias_est_t, var_t, gnss_bias,
+            outage_enabled, outage_start, outage_end
+        )
         st.pyplot(fig_kf_t)
         plt.close(fig_kf_t)
+        
+    with col_p2:
+        st.markdown("#### Custom Constellation-Driven Covariance Adaptation & Kalman Gain")
+        fig_dyn_r_t = plot_dynamic_r_diagnostics(
+            true_time,
+            np.array([max(0, int(total_count[i % len(total_count)] * sat_scale)) for i in range(len(true_time))]),
+            np.sqrt(R_plot_t),
+            kalman_gains_t,
+            outage_enabled,
+            outage_start,
+            outage_end
+        )
+        st.pyplot(fig_dyn_r_t)
+        plt.close(fig_dyn_r_t)
         
     st.markdown("---")
     col_d1, col_d2 = st.columns(2)
@@ -717,7 +781,7 @@ with tab_tuning:
         plt.close(fig_drift_t)
         
     with col_d2:
-        st.markdown("#### Custom Filter Innovation")
+        st.markdown("#### Custom Kalman Filter Measurement Innovation")
         fig_innov_t = plot_kalman_innovation(true_time, innovations_t, outage_enabled, outage_start, outage_end)
         st.pyplot(fig_innov_t)
         plt.close(fig_innov_t)
@@ -916,7 +980,145 @@ def plot_live_playback_times(history_t, history_gnss, history_master, history_rb
     return fig
 
 # ----------------------------------------------------
-# TAB 6: LIVE GNSSDO PLAYBACK
+# TAB 6: HOLDOVER VERIFICATION
+# ----------------------------------------------------
+with tab_holdover:
+    st.subheader("Holdover Verification & Stress Testing")
+    st.markdown("""
+    This panel performs automated stress testing of the GNSSDO system under various GNSS outage conditions.
+    By evaluating clock drift during outages and tracking time recovery post-outage, this suite validates 
+    the stability of the Rubidium standard and the reconvergence rate of the Kalman filter.
+    
+    The test runs three scenarios in parallel:
+    * **5-minute Outage** (300 s) — Short transient loss of GNSS signal (e.g. canopy blockage or multi-path interference).
+    * **30-minute Outage** (1800 s) — Medium-duration loss of signal.
+    * **1-hour Outage** (3600 s) — Long-duration loss of signal (e.g. system maintenance or server downtime).
+    """)
+    
+    # Let the user trigger the simulation
+    if st.button("Run Holdover Verification Suite", type="primary", use_container_width=True):
+        with st.spinner("Executing holdover stress tests..."):
+            # We will run the three profiles
+            profiles = [
+                ("5-minute Outage", 300.0, "#10b981"),
+                ("30-minute Outage", 1800.0, "#f59e0b"),
+                ("1-hour Outage", 3600.0, "#ef4444")
+            ]
+            
+            results = []
+            plot_data = {}
+            
+            # Use fixed 7200 s duration and dt=1.0 s for high-resolution recovery timing
+            total_dur = 7200
+            dt_s = 1.0
+            outage_start = 1800.0
+            
+            # Prepare the satellites list
+            scaled_sats = [max(0, int(c * sat_scale)) for c in total_count]
+            
+            for name, outage_dur_s, color in profiles:
+                outage_end = outage_start + outage_dur_s
+                
+                # 1. Simulate Rubidium clock step (using GLOBAL_RANDOM_SEED for consistency across comparison runs)
+                t_p, rb_err_p, rw_p, fw_p, ag_err_p = simulate_rubidium_clock(
+                    total_dur, dt_s, rb_bias, rb_rw_step, rb_noise, rb_aging, seed=GLOBAL_RANDOM_SEED
+                )
+                
+                # 2. Simulate GNSS error step
+                gnss_err_p, sat_err_p, prop_err_p, meas_ns_p, R_profile_p = simulate_gnss_time(
+                    total_dur, dt_s, gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov,
+                    sat_counts=scaled_sats, dynamic_r_enabled=dynamic_r_enabled, seed=GLOBAL_RANDOM_SEED
+                )
+                
+                # 3. Kalman Filter
+                Q_val = rb_rw_step ** 2
+                R_val = R_profile_p if dynamic_r_enabled else gnss_meas ** 2
+                
+                kf_out_p = run_kalman_filter_v2(
+                    t_p, rb_err_p, gnss_err_p,
+                    outage_enabled=True, outage_start=outage_start, outage_end=outage_end,
+                    Q_bias=Q_val, Q_drift=1e-22, R_val=R_val
+                )
+                kal_est_p, drift_est_p, kal_var_p, m_err_p, innov_p = kf_out_p
+                
+                # Calibrate master error by subtracting static receiver bias
+                calibrated_master_error_p = m_err_p - gnss_bias
+                
+                # Calculate metrics
+                outage_mask = (t_p >= outage_start) & (t_p < outage_end)
+                peak_err_ns = np.max(np.abs(calibrated_master_error_p[outage_mask])) * 1e9
+                rms_err_ns = np.sqrt(np.mean(calibrated_master_error_p[outage_mask]**2)) * 1e9
+                final_err_ns = np.abs(calibrated_master_error_p[-1]) * 1e9
+                
+                # Recovery time using calibrated master error
+                rec_time = calculate_recovery_time(t_p, calibrated_master_error_p, outage_end, threshold_ns=target_accuracy_ns, dt=dt_s, window_seconds=30.0)
+                
+                # Mean frequency drift rate (ps/s) during holdover
+                idx_start = int(round(outage_start / dt_s))
+                idx_end = int(round(outage_end / dt_s))
+                phase_start = calibrated_master_error_p[idx_start]
+                phase_end = calibrated_master_error_p[idx_end]
+                mean_drift_s_s = (phase_end - phase_start) / outage_dur_s
+                mean_drift_ps_s = mean_drift_s_s * 1e12
+                
+                results.append({
+                    "Profile": name,
+                    "Outage Duration": f"{int(outage_dur_s/60)} min",
+                    "Peak Time Error": f"{peak_err_ns/1e3:.2f} µs" if peak_err_ns >= 1000 else f"{peak_err_ns:.1f} ns",
+                    "RMS Time Error": f"{rms_err_ns/1e3:.2f} µs" if rms_err_ns >= 1000 else f"{rms_err_ns:.1f} ns",
+                    "Final Time Error": f"{final_err_ns/1e3:.2f} µs" if final_err_ns >= 1000 else f"{final_err_ns:.1f} ns",
+                    "Target Limit": f"{target_accuracy_ns:.0f} ns",
+                    "Recovery Time": f"{rec_time:.1f} s" if rec_time is not None else "Not achieved",
+                    "Mean Drift Rate (ps/s)": f"{mean_drift_ps_s:+.2f} ps/s"
+                })
+                
+                plot_data[name] = {
+                    "time": t_p,
+                    "master_error": calibrated_master_error_p,
+                    "color": color,
+                    "outage_end": outage_end
+                }
+                
+            # Display summary table
+            st.markdown("### Stress Test Performance Summary")
+            st.table(pd.DataFrame(results))
+            
+            # Plot comparison curves
+            st.markdown("### Holdover Error Growth & Reconvergence Curves")
+            fig_h, ax_h = plt.subplots(figsize=(14, 5.5))
+            
+            # Zoom in on the outage and post-outage period (t = 1500 s to 6500 s)
+            zoom_mask = (t_p >= 1500) & (t_p <= 6500)
+            t_zoom = t_p[zoom_mask]
+            
+            for name in plot_data:
+                err_zoom = plot_data[name]["master_error"][zoom_mask] * 1e9
+                ax_h.plot(t_zoom, err_zoom, label=name, color=plot_data[name]["color"], linewidth=1.8)
+                
+                # Draw vertical lines for outage end
+                ax_h.axvline(plot_data[name]["outage_end"], color=plot_data[name]["color"], linestyle=":", alpha=0.7)
+                
+            # Draw common outage start
+            ax_h.axvline(outage_start, color="#4b5563", linestyle="--", label="Outage Inject (t=1800s)")
+            
+            # Draw threshold bounds
+            ax_h.axhline(target_accuracy_ns, color="#ef4444", linestyle="-.", alpha=0.5, label=f"Accuracy Target (±{target_accuracy_ns} ns)")
+            ax_h.axhline(-target_accuracy_ns, color="#ef4444", linestyle="-.", alpha=0.5)
+            
+            ax_h.set_ylabel("Calibrated Phase Error (ns)", color="#334155")
+            ax_h.set_xlabel("Simulation Elapsed Time (s)", color="#334155")
+            ax_h.grid(True, linestyle=":", color="#cbd5e1")
+            ax_h.legend(loc="upper left", framealpha=0.9, labelcolor="#334155")
+            ax_h.patch.set_facecolor('#ffffff')
+            fig_h.patch.set_facecolor('#f8fafc')
+            ax_h.tick_params(colors='#334155')
+            
+            plt.tight_layout()
+            st.pyplot(fig_h)
+            plt.close(fig_h)
+
+# ----------------------------------------------------
+# TAB 7: LIVE GNSSDO PLAYBACK
 # ----------------------------------------------------
 with tab_playback:
     st.subheader("Live GNSSDO Simulation")

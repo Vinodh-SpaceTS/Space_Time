@@ -67,10 +67,10 @@ def build_Q_matrix(dt, h0=H0, h_neg1=H_NEG1, h_neg2=H_NEG2):
 class KalmanOutput:
     """
     Custom wrapper class that behaves like a tuple of length 5 for backward-compatible
-    unpacking, while exposing extra diagnostics (like divergence flags and innovation ratios)
-    as properties.
+    unpacking, while exposing extra diagnostics (like divergence flags, innovation ratios,
+    and Kalman gains) as properties.
     """
-    def __init__(self, bias_estimates, drift_estimates, kalman_variance, master_error, innovations, diverged_flags, innovation_ratios):
+    def __init__(self, bias_estimates, drift_estimates, kalman_variance, master_error, innovations, diverged_flags, innovation_ratios, kalman_gains):
         self.bias_estimates = bias_estimates
         self.drift_estimates = drift_estimates
         self.kalman_variance = kalman_variance
@@ -78,6 +78,7 @@ class KalmanOutput:
         self.innovations = innovations
         self.diverged_flags = diverged_flags
         self.innovation_ratios = innovation_ratios
+        self.kalman_gains = kalman_gains
 
     def __iter__(self):
         yield self.bias_estimates
@@ -91,6 +92,7 @@ class KalmanOutput:
 
     def __len__(self):
         return 5
+
 
 def run_kalman_filter_v2(
     true_time,
@@ -208,6 +210,7 @@ def run_kalman_filter_v2(
     innovations     = np.zeros(N)
     diverged_flags  = np.zeros(N, dtype=bool)
     innovation_ratios = np.zeros(N)
+    kalman_gains    = np.zeros(N)
 
     consecutive_divergent_count = 0
 
@@ -253,12 +256,16 @@ def run_kalman_filter_v2(
             else:
                 diverged_flags[k] = False
 
+            # Collect Kalman gain for the phase bias state
+            kalman_gains[k] = P_pred_bias / S_k if S_k > 0 else 0.0
+
             kf.update(z)
         else:
             innovations[k] = np.nan
             innovation_ratios[k] = np.nan
             diverged_flags[k] = False
             consecutive_divergent_count = 0
+            kalman_gains[k] = 0.0
 
         bias_estimates[k]  = kf.x[0, 0]
         drift_estimates[k] = kf.x[1, 0]
@@ -273,7 +280,8 @@ def run_kalman_filter_v2(
         master_error,
         innovations,
         diverged_flags,
-        innovation_ratios
+        innovation_ratios,
+        kalman_gains
     )
 
 
@@ -402,6 +410,54 @@ def plot_kalman_innovation(
     return fig_in
 
 
+def plot_dynamic_r_diagnostics(
+    true_time, sat_counts, measurement_noise_stds, kalman_gains,
+    outage_enabled, outage_start, outage_end
+):
+    """
+    Plots the relationship between visible satellite count, dynamic measurement noise R, and Kalman Gain.
+    """
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+
+    # 1. Satellite Count
+    ax1.plot(true_time, sat_counts, color="#2563eb", linewidth=1.5, label="Visible Satellites")
+    ax1.set_ylabel("Satellite Count", color="#2563eb")
+    ax1.tick_params(axis='y', labelcolor="#2563eb")
+    ax1.set_title("Constellation-Driven Covariance Adaptation & Kalman Gain Diagnostics",
+                 color="#0f172a", fontsize=12, fontweight="bold")
+    ax1.grid(True, linestyle=":", color="#cbd5e1")
+    
+    # 2. Dynamic R (std dev in ns)
+    # Capped for lock loss scenarios to prevent infinite scaling on plot
+    capped_stds = np.minimum(measurement_noise_stds * 1e9, 500.0)
+    ax2.plot(true_time, capped_stds, color="#dc2626", linewidth=1.5, label="Dynamic R (σ_R)")
+    ax2.fill_between(true_time, capped_stds, color="#dc2626", alpha=0.1)
+    ax2.set_ylabel("Measurement Std Dev σ_R (ns)", color="#dc2626")
+    ax2.tick_params(axis='y', labelcolor="#dc2626")
+    ax2.grid(True, linestyle=":", color="#cbd5e1")
+    
+    # 3. Kalman Gain
+    ax3.plot(true_time, kalman_gains, color="#059669", linewidth=1.8, label="Kalman Gain (K_bias)")
+    ax3.fill_between(true_time, kalman_gains, color="#059669", alpha=0.1)
+    ax3.set_ylabel("Kalman Gain K_bias", color="#059669")
+    ax3.tick_params(axis='y', labelcolor="#059669")
+    ax3.set_xlabel("Time (s)", color="#334155")
+    ax3.grid(True, linestyle=":", color="#cbd5e1")
+
+    # Draw outage window on all subplots
+    if outage_enabled:
+        for ax in (ax1, ax2, ax3):
+            ax.axvspan(outage_start, outage_end, color="#ef4444", alpha=0.08, label="GNSS Outage")
+
+    for ax in (ax1, ax2, ax3):
+        ax.patch.set_facecolor('#ffffff')
+        ax.tick_params(colors='#334155')
+
+    fig.patch.set_facecolor('#f8fafc')
+    plt.tight_layout()
+    return fig
+
+
 def calculate_holdover_uncertainties(kf_P, dt, Q_matrix):
     """
     Propagates kf.P covariance matrix forward in time without measurement updates
@@ -430,6 +486,28 @@ def calculate_holdover_uncertainties(kf_P, dt, Q_matrix):
     sigma_1h = 3.0 * np.sqrt(max(0.0, P_temp[0, 0]))
     
     return sigma_1m, sigma_10m, sigma_1h
+
+
+def calculate_recovery_time(true_time, master_error, outage_end, threshold_ns=50.0, dt=1.0, window_seconds=30.0):
+    """
+    Calculates the time in seconds taken for the disciplined master clock error to fall
+    and stabilize below the threshold_ns accuracy target after the outage ends.
+    """
+    threshold_s = threshold_ns * 1e-9
+    post_outage_mask = true_time >= outage_end
+    post_t = true_time[post_outage_mask]
+    post_err = np.abs(master_error[post_outage_mask])
+    
+    # Convert window in seconds to number of epochs
+    window_len = max(1, int(round(window_seconds / dt)))
+    
+    n = len(post_err)
+    for i in range(n):
+        end_idx = min(i + window_len, n)
+        if np.all(post_err[i:end_idx] < threshold_s):
+            return post_t[i] - outage_end
+    return None
+
 
 
 # ── Standalone test ────────────────────────────────────────────────────────────
