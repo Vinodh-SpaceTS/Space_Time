@@ -376,18 +376,18 @@ kalman_estimate, drift_estimates, kalman_variance, master_error, innovations, di
 # ====================================================
 # TABS SYSTEM
 # ====================================================
-tab_telemetry, tab_constellation, tab_diagnostics, tab_tuning, tab_allan, tab_holdover, tab_playback = st.tabs([
+tab_playback, tab_telemetry, tab_constellation, tab_diagnostics, tab_tuning, tab_allan, tab_holdover = st.tabs([
+    "Live GNSSDO Playback",
     "Real-Time Telemetry & Diagnostics",
     "Constellation Analysis (RINEX)",
     "Signal Source Characterization",
-    "Kalman Tuning",
+    "Kalman Tuning & Filter Diagnostics",
     "Allan Deviation Analysis",
-    "Holdover Verification",
-    "Live GNSSDO Playback"
+    "Holdover Verification"
 ])
 
 # ----------------------------------------------------
-# TAB 1: REAL-TIME TELEMETRY & DIAGNOSTICS
+# TAB 2: REAL-TIME TELEMETRY & DIAGNOSTICS
 # ----------------------------------------------------
 with tab_telemetry:
     # Render operational status
@@ -529,7 +529,7 @@ with tab_telemetry:
     st.dataframe(sim_data, width="stretch")
 
 # ----------------------------------------------------
-# TAB 2: CONSTELLATION ANALYSIS (RINEX)
+# TAB 3: CONSTELLATION ANALYSIS (RINEX)
 # ----------------------------------------------------
 with tab_constellation:
     st.markdown("### Satellite Status (RINEX Data: Station AB04)")
@@ -594,7 +594,7 @@ with tab_constellation:
     st.dataframe(rinex_df, width="stretch")
 
 # ----------------------------------------------------
-# TAB 3: SIGNAL SOURCE CHARACTERIZATION
+# TAB 4: SIGNAL SOURCE CHARACTERIZATION
 # ----------------------------------------------------
 with tab_diagnostics:
     st.markdown("### Signal Source Characterization")
@@ -687,7 +687,7 @@ with tab_diagnostics:
             st.table(gnss_stats)
 
 # ----------------------------------------------------
-# TAB 4: KALMAN TUNING
+# TAB 5: KALMAN TUNING & FILTER DIAGNOSTICS
 # ----------------------------------------------------
 with tab_tuning:
     st.markdown("### Kalman Filter Tuning")
@@ -827,7 +827,7 @@ with tab_tuning:
         plt.close(fig_innov_t)
 
 # ----------------------------------------------------
-# TAB 5: ALLAN DEVIATION ANALYSIS
+# TAB 6: ALLAN DEVIATION ANALYSIS
 # ----------------------------------------------------
 with tab_allan:
     st.markdown("### Allan Deviation Analysis")
@@ -982,7 +982,7 @@ def plot_live_playback_times(history_t, history_gnss, history_master, history_rb
     return fig
 
 # ----------------------------------------------------
-# TAB 6: HOLDOVER VERIFICATION
+# TAB 7: HOLDOVER VERIFICATION
 # ----------------------------------------------------
 with tab_holdover:
     st.subheader("Holdover Verification & Stress Testing")
@@ -1120,7 +1120,7 @@ with tab_holdover:
             plt.close(fig_h)
 
 # ----------------------------------------------------
-# TAB 7: LIVE GNSSDO PLAYBACK
+# TAB 1: LIVE GNSSDO PLAYBACK
 # ----------------------------------------------------
 with tab_playback:
     st.subheader("Live GNSSDO Simulation")
