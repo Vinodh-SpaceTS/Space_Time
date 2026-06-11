@@ -8,6 +8,46 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+# ─── Live Telemetry Playback Helpers (Defined early for use in tabs) ───────────
+
+def format_telemetry_time(dt_obj, seconds_offset=0.0, date_only=False, time_only=False):
+    """
+    Formats a datetime object with a floating-point seconds offset added to it,
+    rendering it as a UTC string representation with nanosecond sub-seconds.
+    """
+    whole_sec = int(seconds_offset)
+    frac_sec = seconds_offset - whole_sec
+    
+    dt_at_epoch = dt_obj + timedelta(seconds=whole_sec)
+    ns = int(round(frac_sec * 1e9))
+    if ns < 0:
+        dt_at_epoch -= timedelta(seconds=1)
+        ns += 1000000000
+        
+    dt_str = dt_at_epoch.strftime("%Y-%m-%d %H:%M:%S")
+    if date_only:
+        return dt_at_epoch.strftime("%Y-%m-%d")
+    elif time_only:
+        return f"{dt_at_epoch.strftime('%H:%M:%S')}.{ns:09d}"
+    else:
+        return f"{dt_str}.{ns:09d}"
+
+def format_offset(val_sec):
+    val_ns = val_sec * 1e9
+    if abs(val_ns) < 1000:
+        return f"{val_ns:+.0f} ns"
+    elif abs(val_ns) < 1e6:
+        return f"{val_ns/1e3:+.2f} µs"
+    else:
+        return f"{val_ns/1e6:+.2f} ms"
+
+def format_uncertainty(val_sec):
+    val_ns = val_sec * 1e9
+    if val_ns < 1000:
+        return f"±{val_ns:.0f} ns"
+    else:
+        return f"±{val_ns/1e3:.1f} µs"
+
 # Configure Streamlit page
 st.set_page_config(
     page_title="GNSSDO Synchronization Telemetry",
@@ -844,45 +884,7 @@ with tab_allan:
             """, unsafe_allow_html=True)
 
 
-# ─── Live Telemetry Playback Helpers ──────────────────────────────────────────
-
-def format_telemetry_time(dt_obj, seconds_offset=0.0, date_only=False, time_only=False):
-    """
-    Formats a datetime object with a floating-point seconds offset added to it,
-    rendering it as a UTC string representation with nanosecond sub-seconds.
-    """
-    whole_sec = int(seconds_offset)
-    frac_sec = seconds_offset - whole_sec
-    
-    dt_at_epoch = dt_obj + timedelta(seconds=whole_sec)
-    ns = int(round(frac_sec * 1e9))
-    if ns < 0:
-        dt_at_epoch -= timedelta(seconds=1)
-        ns += 1000000000
-        
-    dt_str = dt_at_epoch.strftime("%Y-%m-%d %H:%M:%S")
-    if date_only:
-        return dt_at_epoch.strftime("%Y-%m-%d")
-    elif time_only:
-        return f"{dt_at_epoch.strftime('%H:%M:%S')}.{ns:09d}"
-    else:
-        return f"{dt_str}.{ns:09d}"
-
-def format_offset(val_sec):
-    val_ns = val_sec * 1e9
-    if abs(val_ns) < 1000:
-        return f"{val_ns:+.0f} ns"
-    elif abs(val_ns) < 1e6:
-        return f"{val_ns/1e3:+.2f} µs"
-    else:
-        return f"{val_ns/1e6:+.2f} ms"
-
-def format_uncertainty(val_sec):
-    val_ns = val_sec * 1e9
-    if val_ns < 1000:
-        return f"±{val_ns:.0f} ns"
-    else:
-        return f"±{val_ns/1e3:.1f} µs"
+# (Helpers moved to the top of the file)
 
 def plot_live_playback_errors(history_t, history_gnss, history_master, history_rb):
     """
