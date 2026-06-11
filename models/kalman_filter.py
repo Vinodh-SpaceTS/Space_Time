@@ -555,3 +555,58 @@ if __name__ == "__main__":
     fig3 = plot_estimated_drift(t, drift_est)
     fig4 = plot_kalman_innovation(t, innovs, True, 3000, 5000)
     print("  Plots generated (Agg backend - no display in headless mode)")
+
+
+def calculate_autocorrelation(x, max_lag=20):
+    """
+    Computes the autocorrelation coefficients for lag 1 to max_lag.
+    """
+    N = len(x)
+    if N == 0:
+        return np.array([]), np.array([])
+    mean = np.mean(x)
+    var = np.var(x)
+    if var < 1e-30:
+        return np.arange(1, max_lag + 1), np.zeros(max_lag)
+    
+    lags = np.arange(1, max_lag + 1)
+    acf = []
+    for lag in lags:
+        cov = np.mean((x[:-lag] - mean) * (x[lag:] - mean))
+        acf.append(cov / var)
+    return lags, np.array(acf)
+
+
+def plot_innovation_autocorrelation(innovations, max_lag=20):
+    """
+    Plots the autocorrelation of innovations (correlogram) with 95% confidence bounds.
+    """
+    fig, ax = plt.subplots(figsize=(14, 4.2))
+    
+    lags, acf = calculate_autocorrelation(innovations, max_lag)
+    N = len(innovations)
+    conf_limit = 1.96 / np.sqrt(N) if N > 0 else 0.0
+    
+    # Draw bars for autocorrelation coefficients
+    ax.bar(lags, acf, color="#4f46e5", alpha=0.8, width=0.4, label="Autocorrelation")
+    ax.axhline(0, color="#64748b", linewidth=1.0)
+    
+    # Draw confidence bounds
+    ax.axhline(conf_limit, color="#ef4444", linestyle="--", linewidth=1.2, label="95% Confidence Limit")
+    ax.axhline(-conf_limit, color="#ef4444", linestyle="--", linewidth=1.2)
+    
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_xlim(0, max_lag + 1)
+    ax.set_xticks(lags)
+    ax.set_ylabel("Autocorrelation", color="#334155")
+    ax.set_xlabel("Lag (epochs)", color="#334155")
+    ax.set_title("Innovation Autocorrelation (Correlogram) & Whiteness Diagnostic",
+                 color="#0f172a", fontsize=11, fontweight="bold")
+    ax.grid(True, linestyle=":", color="#cbd5e1")
+    ax.legend(loc="upper right", framealpha=0.8, labelcolor="#334155")
+    ax.patch.set_facecolor('#ffffff')
+    fig.patch.set_facecolor('#f8fafc')
+    ax.tick_params(colors='#334155')
+    plt.tight_layout()
+    return fig
+

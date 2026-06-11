@@ -48,6 +48,20 @@ def format_uncertainty(val_sec):
     else:
         return f"±{val_ns/1e3:.1f} µs"
 
+def format_fractional_frequency(value):
+    """
+    Formats a dimensionless fractional frequency stability value (y = df/f)
+    using standard timing system units: ppm (1e-6), ppb (1e-9), ppt (1e-12), or ppq (1e-15).
+    """
+    if abs(value) < 1e-12:
+        return f"{value * 1e15:+.2f} ppq"
+    elif abs(value) < 1e-9:
+        return f"{value * 1e12:+.2f} ppt"
+    elif abs(value) < 1e-6:
+        return f"{value * 1e9:+.2f} ppb"
+    else:
+        return f"{value * 1e6:+.2f} ppm"
+
 # Configure Streamlit page
 st.set_page_config(
     page_title="GNSSDO Synchronization Telemetry",
@@ -283,7 +297,7 @@ sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'analys
 # Import functions from modules
 from clock_model import simulate_rubidium_clock, plot_rubidium_clock, plot_error_without_bias, plot_rubidium_random_walk, plot_rubidium_aging, plot_rubidium_distribution, plot_rubidium_frequency_wander
 from gnss_time_model import simulate_gnss_time, plot_gnss_time_components, plot_full_gnss_error, plot_gnss_component_breakdown
-from kalman_filter import run_kalman_filter_v2, plot_disciplined_clock_v2, plot_kalman_diagnostics_v2, plot_estimated_drift, plot_kalman_innovation, calculate_holdover_uncertainties, build_Q_matrix, plot_dynamic_r_diagnostics, calculate_recovery_time
+from kalman_filter import run_kalman_filter_v2, plot_disciplined_clock_v2, plot_kalman_diagnostics_v2, plot_estimated_drift, plot_kalman_innovation, calculate_holdover_uncertainties, build_Q_matrix, plot_dynamic_r_diagnostics, calculate_recovery_time, calculate_autocorrelation, plot_innovation_autocorrelation
 from gnss_analysis import parse_rinex_file, plot_satellite_visibility, parse_rinex_metadata
 from analysis.allan_deviation import calculate_allan_deviation, plot_allan_deviation_comparison, allan_plot_lock
 from config import RINEX_FILEPATH, GLOBAL_RANDOM_SEED, validate_config
@@ -376,7 +390,12 @@ with st.sidebar.expander("Atomic Standard Settings", expanded=False):
     rb_bias_ns = st.sidebar.number_input("Rubidium Initial Bias (ns)", 0.0, 5000000.0, rb_bias_ns, 50000.0)
     rb_rw_step_ns = st.sidebar.number_input("Rubidium Random Walk Step (ns)", 0.0, 100.0, rb_rw_step_ns, 0.1, format="%.3f")
     rb_noise_ns = st.sidebar.number_input("Rubidium White Noise (ns)", 0.0, 100.0, rb_noise_ns, 0.5)
-    rb_aging_ns_s = st.sidebar.number_input("Rubidium Aging Rate (ns/s^2)", 0.0, 1.0, rb_aging_ns_s, 0.01, format="%.3f")
+    rb_aging_ns_s = st.sidebar.number_input("Rubidium Aging Rate (ns/s^2)", 0.0, 1.0, rb_aging_ns_s, 0.01, format="%.4f")
+    # Daily frequency aging: y = drift_rate_s_s * 86400.
+    # aging_ns_s = ns/s^2. In s/s^2, it is aging_ns_s * 1e-9.
+    # daily_y = aging_ns_s * 1e-9 * 86400
+    daily_y_val = rb_aging_ns_s * 1e-9 * 86400
+    st.sidebar.markdown(f"<span style='font-size: 0.8rem; opacity: 0.85;'>**Daily Aging y(t):** {format_fractional_frequency(daily_y_val)} / day</span>", unsafe_allow_html=True)
 
 with st.sidebar.expander("GNSS Environment Settings", expanded=False):
     gnss_bias_ns = st.sidebar.number_input("GNSS Bias (ns)", 0.0, 1000.0, gnss_bias_ns, 10.0)
@@ -574,12 +593,23 @@ with tab_telemetry:
     master_rms = np.sqrt(np.mean(calibrated_master_error[active_indices]**2)) * 1e9
     master_max = np.max(np.abs(calibrated_master_error[active_indices])) * 1e9
     
+    # Calculate whiteness of default innovations
+    active_innovations = innovations[active_indices]
+    lags_def, acf_def = calculate_autocorrelation(active_innovations, max_lag=20)
+    conf_limit_def = 1.96 / np.sqrt(len(active_innovations)) if len(active_innovations) > 0 else 0.0
+    outside_count_def = np.sum(np.abs(acf_def) > conf_limit_def)
+    whiteness_percentage_def = (1.0 - outside_count_def / len(acf_def)) * 100.0
+    whiteness_pass_def = outside_count_def <= 2
+    
+    whiteness_status_text = "WHITE" if whiteness_pass_def else "COLORED"
+    whiteness_color = "value-green" if whiteness_pass_def else "value-orange"
+    
     passed_assessment = master_max < target_accuracy_ns
     status_text = "PASS" if passed_assessment else "FAIL"
     status_color = "#059669" if passed_assessment else "#dc2626"
     
     st.markdown("### Timing System Performance Scorecard")
-    cols_scorecard = st.columns([1, 1, 1, 1, 1.2])
+    cols_scorecard = st.columns([1, 1, 1, 1, 1, 1.2])
     with cols_scorecard[0]:
         st.markdown(f'<div class="metric-card"><div class="metric-value value-green">{gnss_rms:.1f} ns</div><div class="metric-label">GNSS RMS Error</div></div>', unsafe_allow_html=True)
     with cols_scorecard[1]:
@@ -589,6 +619,8 @@ with tab_telemetry:
     with cols_scorecard[3]:
         st.markdown(f'<div class="metric-card"><div class="metric-value value-purple">{master_max:.2f} ns</div><div class="metric-label">Master Peak Error</div></div>', unsafe_allow_html=True)
     with cols_scorecard[4]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value {whiteness_color}">{whiteness_percentage_def:.0f}%</div><div class="metric-label">Filter Whiteness</div></div>', unsafe_allow_html=True)
+    with cols_scorecard[5]:
         st.markdown(
             f'<div class="metric-card" style="background-color: {status_color}10; border-color: {status_color}50;">'
             f'<div class="metric-value" style="color: {status_color};">{status_text}</div>'
@@ -915,8 +947,11 @@ with tab_tuning:
     if np.any(kf_out_t.diverged_flags):
         st.error("⚠️ **Tuned Kalman Filter Divergence Detected!** Innovations have grown unbounded. Adjust process noise or measurement noise to stabilize.")
         
+    t_final_drift = drift_est_t[-1]
+    t_final_drift_str = format_fractional_frequency(t_final_drift)
+    
     # Performance summary metrics cards
-    col_tm1, col_tm2, col_tm3 = st.columns(3)
+    col_tm1, col_tm2, col_tm3, col_tm4 = st.columns(4)
     with col_tm1:
         st.markdown(f'<div class="metric-card"><div class="metric-value value-blue">{t_std_overall:.2f} ns</div><div class="metric-label">Master Error Std (Overall)</div></div>', unsafe_allow_html=True)
     with col_tm2:
@@ -926,6 +961,8 @@ with tab_tuning:
             st.markdown(f'<div class="metric-card"><div class="metric-value value-green">N/A</div><div class="metric-label">Peak Outage Error (Outage Inactive)</div></div>', unsafe_allow_html=True)
     with col_tm3:
         st.markdown(f'<div class="metric-card"><div class="metric-value value-purple">{t_final_err:.2f} ns</div><div class="metric-label">Final Error (t={duration}s)</div></div>', unsafe_allow_html=True)
+    with col_tm4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value value-blue">{t_final_drift_str}</div><div class="metric-label">Final Freq Offset y(t)</div></div>', unsafe_allow_html=True)
             
     st.markdown("---")
     st.markdown("### Tuned Filter Diagnostics")
@@ -968,6 +1005,51 @@ with tab_tuning:
         fig_innov_t = plot_kalman_innovation(true_time, innovations_t, outage_enabled, outage_start, outage_end)
         st.pyplot(fig_innov_t)
         plt.close(fig_innov_t)
+
+    st.markdown("---")
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        st.markdown("#### Innovation Autocorrelation (Correlogram)")
+        active_innov_t = innovations_t[t_active_indices]
+        fig_acf_t = plot_innovation_autocorrelation(active_innov_t, max_lag=20)
+        st.pyplot(fig_acf_t)
+        plt.close(fig_acf_t)
+        
+    with col_w2:
+        st.markdown("#### Innovation Whiteness Assessment")
+        
+        # Calculate autocorrelation statistics
+        lags_t, acf_values_t = calculate_autocorrelation(active_innov_t, max_lag=20)
+        conf_limit_t = 1.96 / np.sqrt(len(active_innov_t)) if len(active_innov_t) > 0 else 0.0
+        outside_count_t = np.sum(np.abs(acf_values_t) > conf_limit_t)
+        whiteness_percentage_t = (1.0 - outside_count_t / len(acf_values_t)) * 100.0
+        
+        if outside_count_t <= 2:
+            st.success(f"✅ **Innovation Whiteness Check: PASS** ({whiteness_percentage_t:.0f}% of lags within confidence limits)")
+            st.markdown("""
+            **Interpretation:** 
+            The innovations are statistically uncorrelated (white noise). This indicates that:
+            * The Kalman filter is operating **optimally**.
+            * The configured process noise covariance $Q$ and measurement noise covariance $R$ match the physical oscillator and signal environment parameters.
+            * There are no significant unmodeled state dynamics.
+            """)
+        else:
+            st.warning(f"⚠️ **Innovation Whiteness Check: WARNING** ({whiteness_percentage_t:.0f}% of lags within confidence limits)")
+            st.markdown(f"""
+            **Interpretation:** 
+            Significant autocorrelation detected at {outside_count_t} lag(s). This indicates that:
+            * The Kalman filter is operating **sub-optimally**.
+            * **Action:** Adjust the $Q$ or $R$ sliders to retune the filter until the autocorrelation peaks fall within the red dashed 95% confidence limits.
+            * *Tip:* If innovations are correlated at low lags, the filter is under-trusting new measurements (try decreasing measurement noise $R$ or increasing process noise $Q$).
+            """)
+        
+        # Display autocorrelation values table
+        acf_df = pd.DataFrame({
+            "Lag": lags_t,
+            "Autocorrelation": acf_values_t,
+            "Within Bounds": [abs(val) <= conf_limit_t for val in acf_values_t]
+        })
+        st.dataframe(acf_df, hide_index=True)
 
 # ----------------------------------------------------
 # TAB 6: ALLAN DEVIATION ANALYSIS
