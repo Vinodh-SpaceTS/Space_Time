@@ -64,16 +64,47 @@ def build_Q_matrix(dt, h0=H0, h_neg1=H_NEG1, h_neg2=H_NEG2):
 
 # ── Main filter function ───────────────────────────────────────────────────────
 
+class KalmanOutput:
+    """
+    Custom wrapper class that behaves like a tuple of length 5 for backward-compatible
+    unpacking, while exposing extra diagnostics (like divergence flags and innovation ratios)
+    as properties.
+    """
+    def __init__(self, bias_estimates, drift_estimates, kalman_variance, master_error, innovations, diverged_flags, innovation_ratios):
+        self.bias_estimates = bias_estimates
+        self.drift_estimates = drift_estimates
+        self.kalman_variance = kalman_variance
+        self.master_error = master_error
+        self.innovations = innovations
+        self.diverged_flags = diverged_flags
+        self.innovation_ratios = innovation_ratios
+
+    def __iter__(self):
+        yield self.bias_estimates
+        yield self.drift_estimates
+        yield self.kalman_variance
+        yield self.master_error
+        yield self.innovations
+
+    def __getitem__(self, index):
+        return [self.bias_estimates, self.drift_estimates, self.kalman_variance, self.master_error, self.innovations][index]
+
+    def __len__(self):
+        return 5
+
 def run_kalman_filter_v2(
     true_time,
     rubidium_error,
-    gnss_error,
+    gnss_error=None,
     outage_enabled=False,
     outage_start=0,
     outage_end=0,
     Q_bias=None,
     Q_drift=None,
     R_val=(50e-9)**2,
+    receiver=None,
+    threshold_divergence=5.0,
+    consecutive_limit=5
 ):
     """
     2-state Kalman filter using FilterPy — estimates [clock_bias, clock_drift].
@@ -92,21 +123,28 @@ def run_kalman_filter_v2(
     ----------
     true_time      : ndarray — simulation epoch array (seconds)
     rubidium_error : ndarray — Rb clock phase error (seconds)
-    gnss_error     : ndarray — GNSS measurement error (seconds)
+    gnss_error     : ndarray — GNSS measurement error (seconds) [optional if receiver is provided]
     outage_enabled : bool    — suppress GNSS updates during outage window
     outage_start   : float   — outage start time (seconds)
     outage_end     : float   — outage end time (seconds)
     Q_bias         : float   — override bias process noise variance (optional)
     Q_drift        : float   — override drift process noise variance (optional)
     R_val          : float   — measurement noise variance (default (50 ns)^2)
+    receiver       : BaseReceiver — optional receiver abstraction layer to obtain measurements
+    threshold_divergence : float — innovation ratio threshold for divergence detection (default 5.0)
+    consecutive_limit : int — consecutive epochs exceeding threshold to flag divergence (default 5)
 
     Returns
     -------
-    bias_estimates  : ndarray — estimated clock bias (seconds)
-    drift_estimates : ndarray — estimated clock drift (seconds/second)
-    kalman_variance : ndarray — bias state variance at each epoch (seconds^2)
-    master_error    : ndarray — disciplined master clock error (seconds)
-    innovations     : ndarray — measurement innovations z - H @ x_pred (seconds)
+    output : KalmanOutput — custom object containing:
+             - bias_estimates (ndarray)
+             - drift_estimates (ndarray)
+             - kalman_variance (ndarray)
+             - master_error (ndarray)
+             - innovations (ndarray)
+             and extra properties:
+             - diverged_flags (ndarray of bool)
+             - innovation_ratios (ndarray)
     """
     N  = len(true_time)
     dt = true_time[1] - true_time[0] if N > 1 else 1.0
@@ -114,9 +152,19 @@ def run_kalman_filter_v2(
     # ── Build filter ──────────────────────────────────────────────────────────
     kf = KalmanFilter(dim_x=2, dim_z=1)
 
+    # Initial GNSS error baseline
+    if receiver is not None:
+        init_res = receiver.measure(true_time[0], dt)
+        gnss_error_0 = init_res["gnss_error"]
+        R_0 = init_res["R"]
+    else:
+        gnss_error_0 = gnss_error[0] if gnss_error is not None else 0.0
+        is_r_seq = hasattr(R_val, "__len__") and not isinstance(R_val, (str, bytes))
+        R_0 = R_val[0] if is_r_seq else R_val
+
     # Initial state: [bias, drift] — bias from first measurement, drift = 0
     kf.x = np.array([
-        [rubidium_error[0] - gnss_error[0]],
+        [rubidium_error[0] - gnss_error_0],
         [0.0]
     ])
 
@@ -143,26 +191,74 @@ def run_kalman_filter_v2(
         Q_phys[1, 1] = Q_drift
     kf.Q = Q_phys
 
-    # Measurement noise R
-    kf.R = np.array([[R_val]])
+    # Measurement noise R (can be static scalar or time-varying vector)
+    if receiver is not None:
+        kf.R = np.array([[R_0]])
+    else:
+        is_r_seq = hasattr(R_val, "__len__") and not isinstance(R_val, (str, bytes))
+        if is_r_seq:
+            kf.R = np.array([[R_val[0]]])
+        else:
+            kf.R = np.array([[R_val]])
 
     # ── Run filter ────────────────────────────────────────────────────────────
     bias_estimates  = np.zeros(N)
     drift_estimates = np.zeros(N)
     kalman_variance = np.zeros(N)
     innovations     = np.zeros(N)
+    diverged_flags  = np.zeros(N, dtype=bool)
+    innovation_ratios = np.zeros(N)
+
+    consecutive_divergent_count = 0
 
     for k in range(N):
+        # Determine current measurements and noise R
+        if receiver is not None:
+            res = receiver.measure(true_time[k], dt)
+            gnss_error_k = res["gnss_error"]
+            R_k = res["R"]
+            kf.R = np.array([[R_k]])
+            in_outage = (outage_enabled and (outage_start <= true_time[k] < outage_end)) or (R_k > 1e10)
+        else:
+            gnss_error_k = gnss_error[k] if gnss_error is not None else 0.0
+            if is_r_seq:
+                R_k = R_val[k]
+                kf.R = np.array([[R_k]])
+            else:
+                R_k = R_val
+            in_outage = (outage_enabled and (outage_start <= true_time[k] < outage_end)) or (R_k > 1e10)
+
         kf.predict()
         x_pred_bias = kf.x[0, 0]
+        P_pred_bias = kf.P[0, 0]
+        S_k = P_pred_bias + R_k
 
-        in_outage = outage_enabled and (outage_start <= true_time[k] < outage_end)
         if not in_outage:
-            z = rubidium_error[k] - gnss_error[k]
-            innovations[k] = z - x_pred_bias
+            z = rubidium_error[k] - gnss_error_k
+            innov_k = z - x_pred_bias
+            innovations[k] = innov_k
+            
+            # Divergence Check
+            # ratio = |innovation| / sqrt(S)
+            ratio_k = abs(innov_k) / np.sqrt(S_k) if S_k > 0 else 0.0
+            innovation_ratios[k] = ratio_k
+            
+            if ratio_k > threshold_divergence:
+                consecutive_divergent_count += 1
+            else:
+                consecutive_divergent_count = 0
+                
+            if consecutive_divergent_count >= consecutive_limit:
+                diverged_flags[k] = True
+            else:
+                diverged_flags[k] = False
+
             kf.update(z)
         else:
             innovations[k] = np.nan
+            innovation_ratios[k] = np.nan
+            diverged_flags[k] = False
+            consecutive_divergent_count = 0
 
         bias_estimates[k]  = kf.x[0, 0]
         drift_estimates[k] = kf.x[1, 0]
@@ -170,7 +266,15 @@ def run_kalman_filter_v2(
 
     master_error = rubidium_error - bias_estimates
 
-    return bias_estimates, drift_estimates, kalman_variance, master_error, innovations
+    return KalmanOutput(
+        bias_estimates,
+        drift_estimates,
+        kalman_variance,
+        master_error,
+        innovations,
+        diverged_flags,
+        innovation_ratios
+    )
 
 
 # Alias — allows old import `from kalman_filter import run_kalman_filter` to work

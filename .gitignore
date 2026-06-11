@@ -20,3 +20,8 @@ Thumbs.db
 ~$*
 *.tmp
 *~
+
+# Scratch and generated assets
+scratch/
+*.png
+

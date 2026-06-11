@@ -33,3 +33,47 @@ OUTAGE_END = 5000               # GNSS outage end time (seconds)
 # DATA PATHS
 # ====================================================
 RINEX_FILEPATH = r"data/ab041000.25o"
+VALIDATION_RINEX_FILEPATH = r"GNSS_DATA/ALGO00CAN_R_20251000000_01D_30S_MO.crx.gz"
+VALIDATION_CLOCK_FILEPATH = r"GNSS_DATA/ESA0OPSFIN_20251000000_01D_30S_CLK.CLK.gz"
+VALIDATION_CLOCK_TRUTH_CSV = r"data/algo_receiver_clock_truth_2025100.csv"
+
+# ====================================================
+# REPRODUCIBILITY
+# ====================================================
+GLOBAL_RANDOM_SEED = 42
+
+def validate_config():
+    """
+    Validates that the configuration parameters are within realistic and physical bounds.
+    Raises ValueError if any parameter is invalid.
+    """
+    if SIM_DURATION <= 0:
+        raise ValueError(f"SIM_DURATION must be positive, got {SIM_DURATION}")
+    if SIM_DT <= 0:
+        raise ValueError(f"SIM_DT must be positive, got {SIM_DT}")
+    if SIM_DT > SIM_DURATION:
+        raise ValueError(f"SIM_DT ({SIM_DT}) cannot be larger than SIM_DURATION ({SIM_DURATION})")
+    
+    if RB_BIAS < 0:
+        raise ValueError(f"RB_BIAS cannot be negative, got {RB_BIAS}")
+    if RB_RANDOM_WALK_STEP < 0 or RB_RANDOM_WALK_STEP > 1e-3:
+        raise ValueError(f"RB_RANDOM_WALK_STEP must be in [0, 1e-3], got {RB_RANDOM_WALK_STEP}")
+    if RB_WHITE_NOISE_STD < 0 or RB_WHITE_NOISE_STD > 1e-3:
+        raise ValueError(f"RB_WHITE_NOISE_STD must be in [0, 1e-3], got {RB_WHITE_NOISE_STD}")
+    if RB_AGING_RATE < 0 or RB_AGING_RATE > 1e-3:
+        raise ValueError(f"RB_AGING_RATE must be in [0, 1e-3], got {RB_AGING_RATE}")
+        
+    if GNSS_BIAS < 0 or GNSS_BIAS > 1e-3:
+        raise ValueError(f"GNSS_BIAS must be in [0, 1e-3], got {GNSS_BIAS}")
+    if GNSS_SAT_CLOCK_STD < 0 or GNSS_SAT_CLOCK_STD > 1e-3:
+        raise ValueError(f"GNSS_SAT_CLOCK_STD must be in [0, 1e-3], got {GNSS_SAT_CLOCK_STD}")
+    if GNSS_PROP_STD < 0 or GNSS_PROP_STD > 1e-3:
+        raise ValueError(f"GNSS_PROP_STD must be in [0, 1e-3], got {GNSS_PROP_STD}")
+    if GNSS_MEAS_STD < 0 or GNSS_MEAS_STD > 1e-3:
+        raise ValueError(f"GNSS_MEAS_STD must be in [0, 1e-3], got {GNSS_MEAS_STD}")
+        
+    if OUTAGE_START < 0:
+        raise ValueError(f"OUTAGE_START cannot be negative, got {OUTAGE_START}")
+    if OUTAGE_END < OUTAGE_START:
+        raise ValueError(f"OUTAGE_END ({OUTAGE_END}) cannot be less than OUTAGE_START ({OUTAGE_START})")
+

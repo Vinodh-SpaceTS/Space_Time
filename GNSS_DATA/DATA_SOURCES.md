@@ -1,6 +1,11 @@
 # GNSS Data Sources and Validation
 
-This project currently uses the historical RINEX observation file:
+This project has two GNSS datasets:
+
+1. `AB04` constellation replay data, useful for satellite visibility and playback behavior.
+2. `ALGO` timing validation data, useful for checking GNSSDO timing error against receiver-clock truth.
+
+The original constellation replay file is:
 
 - Local file: `data/ab041000.25o`
 - Station: `AB04`
@@ -8,6 +13,19 @@ This project currently uses the historical RINEX observation file:
 - Format: RINEX `2.11`, mixed GNSS observation data
 - Time scale in header: GPS time, converted to UTC by `analysis/gnss_analysis.py`
 - Primary use in the app: constellation history and live GNSSDO playback validation
+
+The actual timing validation pair is:
+
+- Observation file: `GNSS_DATA/ALGO00CAN_R_20251000000_01D_30S_MO.crx.gz`
+- Clock truth file: `GNSS_DATA/ESA0OPSFIN_20251000000_01D_30S_CLK.CLK.gz`
+- Extracted truth CSV: `data/algo_receiver_clock_truth_2025100.csv`
+- Station: `ALGO`
+- Observation day: `2025-04-10`
+- Epochs: `2,880`
+- Sample interval: `30 seconds`
+- Truth channel: RINEX CLK `AR ALGO` receiver clock offset records, in seconds relative to the ESA/IGS clock-product reference timescale
+
+Use the extracted CSV to validate GNSSDO output by matching `epoch_utc` and comparing your system's master-clock or GNSS receiver time error against `receiver_clock_offset_ns`.
 
 ## Historical GNSS Data
 

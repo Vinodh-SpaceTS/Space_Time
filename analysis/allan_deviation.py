@@ -13,6 +13,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import allantools
 
+import threading
+allan_plot_lock = threading.RLock()
+
+
 
 # ─── Core Allan deviation computation ────────────────────────────────────────
 
@@ -279,7 +283,8 @@ if __name__ == "__main__":
     try:
         from models.kalman_filter import run_kalman_filter_v2
         kalman_available = True
-    except ImportError:
+    except ImportError as e:
+        print(f"IMPORT ERROR OCCURRED: {e}")
         kalman_available = False
         print("kalman_filter.py not found — master clock ADEV will be skipped")
 

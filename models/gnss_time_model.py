@@ -2,9 +2,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def simulate_gnss_time(duration, dt, receiver_bias, sat_clock_std, prop_std, meas_std, use_gauss_markov=False, correlation_time=3600.0):
+def simulate_gnss_time(duration, dt, receiver_bias, sat_clock_std, prop_std, meas_std, 
+                       use_gauss_markov=False, correlation_time=3600.0,
+                       sat_counts=None, dynamic_r_enabled=False, seed=None):
     """
-    Simulates GNSS receiver timing errors.
+    Simulates GNSS receiver timing errors, optionally using a time-varying measurement noise 
+    profile based on satellite visibility (constellation-driven covariance adaptation).
+    
+    Under the hood, this uses the SimulatedReceiver class.
     
     Parameters:
       duration (float): Total simulation time in seconds.
@@ -15,40 +20,50 @@ def simulate_gnss_time(duration, dt, receiver_bias, sat_clock_std, prop_std, mea
       meas_std (float): Standard deviation of receiver measurement noise (seconds).
       use_gauss_markov (bool): If True, models propagation error as a first-order Gauss-Markov process.
       correlation_time (float): Correlation time constant for the Gauss-Markov process (seconds).
+      sat_counts (list/ndarray): Time series of visible satellite counts mapped to epochs.
+      dynamic_r_enabled (bool): Enable satellite-visibility-driven scaling of measurement noise.
+      seed (int): Optional random seed for reproducibility.
       
     Returns:
       gnss_error (ndarray): Array of total GNSS timing errors (seconds).
       sat_clock_error (ndarray): Array of satellite clock errors (seconds).
       propagation_error (ndarray): Array of atmospheric propagation delays (seconds).
       measurement_noise (ndarray): Array of receiver measurement noises (seconds).
+      R_profile (ndarray): Time-varying measurement noise variance profile (seconds^2).
     """
+    from receivers.simulated_receiver import SimulatedReceiver
+    
+    rx = SimulatedReceiver(
+        receiver_bias=receiver_bias,
+        sat_clock_std=sat_clock_std,
+        prop_std=prop_std,
+        meas_std=meas_std,
+        use_gauss_markov=use_gauss_markov,
+        correlation_time=correlation_time,
+        total_counts=sat_counts,
+        dynamic_r_enabled=dynamic_r_enabled,
+        seed=seed
+    )
+    
     true_time = np.arange(0, duration, dt)
     N = len(true_time)
     
-    # 1. Satellite clock error (independent white noise)
-    sat_clock_error = np.random.normal(0, sat_clock_std, N)
+    gnss_error = np.zeros(N)
+    sat_clock_error = np.zeros(N)
+    propagation_error = np.zeros(N)
+    measurement_noise = np.zeros(N)
+    R_profile = np.zeros(N)
     
-    # 2. Propagation error
-    if use_gauss_markov:
-        # First-Order Gauss-Markov Process
-        propagation_error = np.zeros(N)
-        beta = 1.0 / correlation_time
-        # Driving noise variance to maintain steady-state variance of prop_std^2
-        driving_noise_std = prop_std * np.sqrt(2.0 * beta * dt)
+    for i, t in enumerate(true_time):
+        res = rx.measure(t, dt)
+        gnss_error[i] = res["gnss_error"]
+        sat_clock_error[i] = res["sat_clock_error"]
+        propagation_error[i] = res["propagation_error"]
+        measurement_noise[i] = res["measurement_noise"]
+        R_profile[i] = res["R"]
         
-        for i in range(1, N):
-            propagation_error[i] = (1.0 - beta * dt) * propagation_error[i-1] + np.random.normal(0, driving_noise_std)
-    else:
-        # Independent white noise
-        propagation_error = np.random.normal(0, prop_std, N)
-        
-    # 3. Measurement noise (white noise)
-    measurement_noise = np.random.normal(0, meas_std, N)
-    
-    # Total GNSS Error
-    gnss_error = receiver_bias + sat_clock_error + propagation_error + measurement_noise
-    
-    return gnss_error, sat_clock_error, propagation_error, measurement_noise
+    return gnss_error, sat_clock_error, propagation_error, measurement_noise, R_profile
+
 
 def plot_gnss_time_components(true_time, sat_clock_error, propagation_error, measurement_noise):
     """
@@ -119,7 +134,7 @@ if __name__ == "__main__":
     from config import SIM_DURATION, SIM_DT, GNSS_BIAS, GNSS_SAT_CLOCK_STD, GNSS_PROP_STD, GNSS_MEAS_STD
     
     print("Testing models/gnss_time_model.py...")
-    error, sat, prop, meas = simulate_gnss_time(
+    error, sat, prop, meas, R_profile = simulate_gnss_time(
         SIM_DURATION, SIM_DT, GNSS_BIAS, GNSS_SAT_CLOCK_STD, GNSS_PROP_STD, GNSS_MEAS_STD, use_gauss_markov=True
     )
     print(f"Simulation completed. Length: {len(error)}")

@@ -126,8 +126,13 @@ from clock_model import simulate_rubidium_clock, plot_rubidium_clock, plot_error
 from gnss_time_model import simulate_gnss_time, plot_gnss_time_components, plot_full_gnss_error, plot_gnss_component_breakdown
 from kalman_filter import run_kalman_filter_v2, plot_disciplined_clock_v2, plot_kalman_diagnostics_v2, plot_estimated_drift, plot_kalman_innovation, calculate_holdover_uncertainties, build_Q_matrix
 from gnss_analysis import parse_rinex_file, plot_satellite_visibility, parse_rinex_metadata
-from analysis.allan_deviation import calculate_allan_deviation, plot_allan_deviation_comparison
-from config import RINEX_FILEPATH
+from analysis.allan_deviation import calculate_allan_deviation, plot_allan_deviation_comparison, allan_plot_lock
+from config import RINEX_FILEPATH, GLOBAL_RANDOM_SEED, validate_config
+from receivers.simulated_receiver import SimulatedReceiver
+
+# Run config validation at startup
+validate_config()
+
 
 # ====================================================
 # TITLE BLOCK
@@ -212,6 +217,16 @@ with st.sidebar.expander("GNSS Environment Settings", expanded=False):
     gnss_meas_ns = st.sidebar.number_input("GNSS Measurement Noise (ns)", 0.0, 500.0, gnss_meas_ns, 10.0)
     gnss_prop_ns = st.sidebar.number_input("GNSS Propagation Delay (ns)", 0.0, 500.0, gnss_prop_ns, 10.0)
     gnss_sat_ns = st.sidebar.number_input("GNSS Sat Clock Error (ns)", 0.0, 500.0, gnss_sat_ns, 5.0)
+    dynamic_r_enabled = st.sidebar.checkbox(
+        "Constellation-Driven Covariance Adaptation", 
+        value=True, 
+        help="Scale GNSS measurement noise dynamically based on the ratio of average satellite count to current satellite count."
+    )
+    sat_scale = st.sidebar.slider(
+        "Satellite Visibility Scale", 
+        0.1, 1.0, 1.0, 0.05, 
+        help="Scale down the number of visible satellites to simulate blockage, foliage, or antenna degradation."
+    )
 
 # Convert all manual parameter overrides to seconds for backend simulation
 rb_bias = rb_bias_ns * 1e-9
@@ -277,34 +292,42 @@ rinex_sample_interval = (
 @st.cache_data
 def get_system_simulation(duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging,
                           gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov,
-                          outage_enabled, outage_start, outage_end):
+                          outage_enabled, outage_start, outage_end,
+                          dynamic_r_enabled, sat_scale, total_count_tuple, seed):
+    # Scale total counts based on satellite visibility scale
+    scaled_sats = [max(0, int(c * sat_scale)) for c in total_count_tuple]
+
     # 1. Simulate Rubidium clock
     t, rb_err, rw, fw, ag_err = simulate_rubidium_clock(
-        duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging
+        duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging, seed=seed
     )
 
     # 2. Simulate GNSS error components
-    gnss_err, sat_err, prop_err, meas_ns = simulate_gnss_time(
-        duration, dt, gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov
+    gnss_err, sat_err, prop_err, meas_ns, R_profile = simulate_gnss_time(
+        duration, dt, gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov,
+        sat_counts=scaled_sats, dynamic_r_enabled=dynamic_r_enabled, seed=seed
     )
 
     # 3. Run Kalman Filter (2D V2 tracking bias and drift - Default parameters)
     Q_val = rb_rw_step ** 2
-    R_val = gnss_meas ** 2
-    kal_est, drift_est, kal_var, m_err, innov = run_kalman_filter_v2(
+    R_val = R_profile if dynamic_r_enabled else gnss_meas ** 2
+    kf_out = run_kalman_filter_v2(
         t, rb_err, gnss_err, outage_enabled, outage_start, outage_end, Q_bias=Q_val, Q_drift=1e-22, R_val=R_val
     )
+    kal_est, drift_est, kal_var, m_err, innov = kf_out
+    diverged_flags = kf_out.diverged_flags
     
     return (t, rb_err, rw, fw, ag_err, gnss_err, sat_err, prop_err, meas_ns,
-            kal_est, drift_est, kal_var, m_err, innov)
+            kal_est, drift_est, kal_var, m_err, innov, diverged_flags)
 
 # Run or retrieve cached simulation
 true_time, rubidium_error, rb_rw, rb_freq_offset, rb_aging_error, \
 gnss_error, sat_clock_error, propagation_error, measurement_noise, \
-kalman_estimate, drift_estimates, kalman_variance, master_error, innovations = get_system_simulation(
+kalman_estimate, drift_estimates, kalman_variance, master_error, innovations, diverged_flags = get_system_simulation(
     duration, dt, rb_bias, rb_rw_step, rb_noise, rb_aging,
     gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov,
-    outage_enabled, outage_start, outage_end
+    outage_enabled, outage_start, outage_end,
+    dynamic_r_enabled, sat_scale, tuple(total_count), GLOBAL_RANDOM_SEED
 )
 
 # ====================================================
@@ -332,6 +355,10 @@ with tab_telemetry:
     with cols_status[2]:
         st.markdown(f"**System Status:** `{system_status}`")
     st.markdown(f"*{status_desc}*")
+    
+    if np.any(diverged_flags):
+        st.error("⚠️ **Kalman Filter Divergence Detected!** Innovations have grown unbounded relative to theoretical covariance bounds. Check filter tuning or signal environment.")
+        
     st.markdown("---")
     
     st.markdown("### Disciplined Master Clock Phase Error")
@@ -711,13 +738,14 @@ with tab_allan:
         taus_master, adev_master = calculate_allan_deviation(master_error, rate=rate_val)
         
         # Render the comparison plot
-        fig_ad = plot_allan_deviation_comparison(
-            taus_rb, adev_rb,
-            taus_gnss, adev_gnss,
-            taus_master, adev_master
-        )
-        st.pyplot(fig_ad)
-        plt.close(fig_ad)
+        with allan_plot_lock:
+            fig_ad = plot_allan_deviation_comparison(
+                taus_rb, adev_rb,
+                taus_gnss, adev_gnss,
+                taus_master, adev_master
+            )
+            st.pyplot(fig_ad)
+            plt.close(fig_ad)
         
         st.markdown("---")
         st.markdown("### Understanding Allan Deviation & Clock Stability")
@@ -792,9 +820,10 @@ def format_uncertainty(val_sec):
     else:
         return f"±{val_ns/1e3:.1f} µs"
 
-def plot_live_playback_errors(history_t, history_gnss, history_master):
+def plot_live_playback_errors(history_t, history_gnss, history_master, history_rb):
     """
     Plots the last 60 epochs of real-time clock error history.
+    Uses twinx to show GNSS/Disciplined error on the left y-axis, and Rubidium error on the right.
     """
     fig, ax = plt.subplots(figsize=(8, 2.7))
     show_points = 60
@@ -803,18 +832,86 @@ def plot_live_playback_errors(history_t, history_gnss, history_master):
     
     gnss_plot = np.array(history_gnss[-show_points:]) * 1e9
     master_plot = np.array(history_master[-show_points:]) * 1e9
+    rb_plot = np.array(history_rb[-show_points:]) * 1e9
     
+    # Left Axis: True Time Reference, GNSS Jitter, and Disciplined clock
+    ax.axhline(0, label="True Time Reference", color="#64748b", linestyle="--", linewidth=1.2)
     ax.plot(t_plot, gnss_plot, label="GNSS Jitter", color="#059669", alpha=0.35, linestyle=":", marker=".")
     ax.plot(t_plot, master_plot, label="Disciplined Master Clock", color="#4f46e5", linewidth=2.0)
+    ax.set_ylabel("GNSS / Disciplined Error (ns)", color="#334155", fontsize=9)
+    ax.tick_params(colors='#334155', labelsize=8)
     
-    ax.set_ylabel("Error (ns)", color="#334155", fontsize=9)
+    # Right Axis: Raw Rubidium Error
+    ax2 = ax.twinx()
+    ax2.plot(t_plot, rb_plot, label="Raw Rubidium Error", color="#ea580c", linewidth=1.5, alpha=0.8)
+    ax2.set_ylabel("Raw Rubidium Error (ns)", color="#ea580c", fontsize=9)
+    ax2.tick_params(colors='#ea580c', labelsize=8)
+    
+    # Combine legends
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="upper right", framealpha=0.8, labelcolor="#334155", fontsize=8)
+    
     ax.set_xlabel("Elapsed Time in Window (s)", color="#334155", fontsize=9)
     ax.grid(True, linestyle=":", color="#cbd5e1")
-    ax.legend(loc="upper right", framealpha=0.8, labelcolor="#334155", fontsize=8)
     
     ax.patch.set_facecolor('#ffffff')
     fig.patch.set_facecolor('#f8fafc')
+    plt.tight_layout()
+    return fig
+
+def plot_live_playback_times(history_t, history_gnss, history_master, history_rb, times_analysis, k):
+    """
+    Plots the absolute UTC times of all four sources.
+    Uses twinx to show True/GNSS/Disciplined time on the left y-axis, and Rubidium time on the right.
+    """
+    fig, ax = plt.subplots(figsize=(8, 2.7))
+    show_points = 60
+    t_plot = np.array(history_t[-show_points:])
+    t_plot_relative = t_plot - t_plot[0]
+    
+    # Get current nominal UTC time baseline
+    epoch_dt = times_analysis[k % len(times_analysis)]
+    
+    # Absolute errors in seconds
+    gnss_err = np.array(history_gnss[-show_points:])
+    master_err = np.array(history_master[-show_points:])
+    rb_err = np.array(history_rb[-show_points:])
+    
+    # Left Axis: True UTC Time, GNSS Time, and Disciplined clock
+    ax.plot(t_plot_relative, np.zeros_like(t_plot), label="True UTC Time", color="#64748b", linestyle="--", linewidth=1.2)
+    ax.plot(t_plot_relative, gnss_err, label="GNSS Time", color="#059669", alpha=0.35, linestyle=":", marker=".")
+    ax.plot(t_plot_relative, master_err, label="Disciplined Time", color="#4f46e5", linewidth=2.0)
+    ax.set_ylabel("True / GNSS / Disciplined UTC Time", color="#334155", fontsize=9)
     ax.tick_params(colors='#334155', labelsize=8)
+    
+    # Formatting left axis as absolute time stamps
+    from matplotlib.ticker import FuncFormatter
+    def left_time_formatter(y_val, pos):
+        return format_telemetry_time(epoch_dt, y_val, time_only=True)
+    ax.yaxis.set_major_formatter(FuncFormatter(left_time_formatter))
+    
+    # Right Axis: Rubidium Time
+    ax2 = ax.twinx()
+    ax2.plot(t_plot_relative, rb_err, label="Rubidium Time", color="#ea580c", linewidth=1.5, alpha=0.8)
+    ax2.set_ylabel("Rubidium UTC Time (Right Axis)", color="#ea580c", fontsize=9)
+    ax2.tick_params(colors='#ea580c', labelsize=8)
+    
+    # Formatting right axis as absolute time stamps
+    def right_time_formatter(y_val, pos):
+        return format_telemetry_time(epoch_dt, y_val, time_only=True)
+    ax2.yaxis.set_major_formatter(FuncFormatter(right_time_formatter))
+    
+    # Combine legends
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="upper right", framealpha=0.8, labelcolor="#334155", fontsize=8)
+    
+    ax.set_xlabel("Elapsed Time in Window (s)", color="#334155", fontsize=9)
+    ax.grid(True, linestyle=":", color="#cbd5e1")
+    
+    ax.patch.set_facecolor('#ffffff')
+    fig.patch.set_facecolor('#f8fafc')
     plt.tight_layout()
     return fig
 
@@ -822,7 +919,7 @@ def plot_live_playback_errors(history_t, history_gnss, history_master):
 # TAB 6: LIVE GNSSDO PLAYBACK
 # ----------------------------------------------------
 with tab_playback:
-    st.subheader("Live GNSSDO Hardware-in-the-Loop Emulation")
+    st.subheader("Live GNSSDO Simulation")
     st.markdown("This panel runs a live epoch-by-epoch simulation of the GNSSDO system. It is driven by the parsed RINEX satellite counts to dynamically adjust the Kalman filter's measurement noise covariance $R$ and operating modes in real-time.")
     
     @st.fragment
@@ -833,36 +930,141 @@ with tab_playback:
             except Exception:
                 st.rerun()
 
-        current_params = (rb_bias, rb_rw_step, rb_noise, rb_aging, gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov, dt)
+        current_params = (rb_bias, rb_rw_step, rb_noise, rb_aging, gnss_bias, gnss_sat, gnss_prop, gnss_meas, use_gauss_markov, dt, sat_scale)
         if "playback_last_params" not in st.session_state or st.session_state.playback_last_params != current_params:
             st.session_state.playback_last_params = current_params
             st.session_state.playback_epoch = 0
             st.session_state.playback_slider = 0
+            st.session_state.playback_should_increment = False
             st.session_state.playback_history_t = []
             st.session_state.playback_history_rb = []
             st.session_state.playback_history_gnss = []
             st.session_state.playback_history_master = []
+            st.session_state.playback_history_utc = []
+            st.session_state.playback_history_sats = []
+            st.session_state.playback_history_mode = []
+            st.session_state.playback_history_bias_est = []
+            st.session_state.playback_history_drift_est = []
+            st.session_state.playback_history_sigma = []
+            st.session_state.playback_history_R = []
+            st.session_state.playback_history_K = []
+            st.session_state.playback_history_true_time = []
+            st.session_state.playback_history_gnss_time = []
+            st.session_state.playback_history_rubidium_time = []
+            st.session_state.playback_history_disciplined_time = []
+            st.session_state.playback_history_kf_x = []
+            st.session_state.playback_history_kf_P = []
+            st.session_state.playback_history_rb_phase_rw = []
+            st.session_state.playback_history_rb_freq_offset = []
+            st.session_state.playback_history_gnss_prop_err = []
             st.session_state.playback_kf_x = np.array([[rb_bias - gnss_bias], [0.0]])
             st.session_state.playback_kf_P = np.array([[1e-6, 0.0], [0.0, 1e-12]])
             st.session_state.playback_rb_freq_offset = 0.0
             st.session_state.playback_rb_phase_rw = 0.0
             st.session_state.playback_gnss_prop_err = 0.0
             st.session_state.playback_playing = False
+            st.session_state.playback_receiver = SimulatedReceiver(
+                receiver_bias=gnss_bias,
+                sat_clock_std=gnss_sat,
+                prop_std=gnss_prop,
+                meas_std=gnss_meas,
+                use_gauss_markov=use_gauss_markov,
+                total_counts=total_count,
+                gps_counts=gps_count,
+                galileo_counts=galileo_count,
+                glonass_counts=glonass_count,
+                sbas_counts=sbas_count,
+                dynamic_r_enabled=True,
+                sat_scale=sat_scale,
+                seed=GLOBAL_RANDOM_SEED
+            )
 
         # Initialization fallback
         if "playback_epoch" not in st.session_state:
             st.session_state.playback_epoch = 0
             st.session_state.playback_slider = 0
+            st.session_state.playback_should_increment = False
             st.session_state.playback_history_t = []
             st.session_state.playback_history_rb = []
             st.session_state.playback_history_gnss = []
             st.session_state.playback_history_master = []
+            st.session_state.playback_history_utc = []
+            st.session_state.playback_history_sats = []
+            st.session_state.playback_history_mode = []
+            st.session_state.playback_history_bias_est = []
+            st.session_state.playback_history_drift_est = []
+            st.session_state.playback_history_sigma = []
+            st.session_state.playback_history_R = []
+            st.session_state.playback_history_K = []
+            st.session_state.playback_history_true_time = []
+            st.session_state.playback_history_gnss_time = []
+            st.session_state.playback_history_rubidium_time = []
+            st.session_state.playback_history_disciplined_time = []
+            st.session_state.playback_history_kf_x = []
+            st.session_state.playback_history_kf_P = []
+            st.session_state.playback_history_rb_phase_rw = []
+            st.session_state.playback_history_rb_freq_offset = []
+            st.session_state.playback_history_gnss_prop_err = []
             st.session_state.playback_kf_x = np.array([[rb_bias - gnss_bias], [0.0]])
             st.session_state.playback_kf_P = np.array([[1e-6, 0.0], [0.0, 1e-12]])
             st.session_state.playback_rb_freq_offset = 0.0
             st.session_state.playback_rb_phase_rw = 0.0
             st.session_state.playback_gnss_prop_err = 0.0
             st.session_state.playback_playing = False
+            st.session_state.playback_receiver = SimulatedReceiver(
+                receiver_bias=gnss_bias,
+                sat_clock_std=gnss_sat,
+                prop_std=gnss_prop,
+                meas_std=gnss_meas,
+                use_gauss_markov=use_gauss_markov,
+                total_counts=total_count,
+                gps_counts=gps_count,
+                galileo_counts=galileo_count,
+                glonass_counts=glonass_count,
+                sbas_counts=sbas_count,
+                dynamic_r_enabled=True,
+                sat_scale=sat_scale,
+                seed=GLOBAL_RANDOM_SEED
+            )
+
+
+        # Ensure all required history keys are present in session state
+        new_vars = [
+            "playback_history_utc", "playback_history_sats", "playback_history_mode",
+            "playback_history_bias_est", "playback_history_drift_est",
+            "playback_history_sigma", "playback_history_R", "playback_history_K",
+            "playback_history_true_time", "playback_history_gnss_time",
+            "playback_history_rubidium_time", "playback_history_disciplined_time",
+            "playback_history_kf_x", "playback_history_kf_P",
+            "playback_history_rb_phase_rw", "playback_history_rb_freq_offset",
+            "playback_history_gnss_prop_err"
+        ]
+        for var in new_vars:
+            if var not in st.session_state:
+                st.session_state[var] = []
+
+        # Check for length mismatch between all history lists and reset if mismatched
+        history_keys = [
+            "playback_history_t", "playback_history_rb", "playback_history_gnss", "playback_history_master",
+            "playback_history_utc", "playback_history_sats", "playback_history_mode",
+            "playback_history_bias_est", "playback_history_drift_est",
+            "playback_history_sigma", "playback_history_R", "playback_history_K",
+            "playback_history_true_time", "playback_history_gnss_time",
+            "playback_history_rubidium_time", "playback_history_disciplined_time",
+            "playback_history_kf_x", "playback_history_kf_P",
+            "playback_history_rb_phase_rw", "playback_history_rb_freq_offset",
+            "playback_history_gnss_prop_err"
+        ]
+        lengths = [len(st.session_state[k_key]) for k_key in history_keys if k_key in st.session_state]
+        if len(set(lengths)) > 1:
+            for k_key in history_keys:
+                st.session_state[k_key] = []
+
+        # Safe programmatic increment of the epoch (before widgets are drawn)
+        if st.session_state.get("playback_should_increment", False) and st.session_state.playback_playing:
+            st.session_state.playback_epoch += 1
+            st.session_state.playback_slider = st.session_state.playback_epoch
+            st.session_state.playback_should_increment = False
 
         # Calculate dataset bounds and progress
         total_epochs = len(total_count)
@@ -886,8 +1088,8 @@ with tab_playback:
         else:
             time_left_str = "0h 0m 0s"
 
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2.5])
-        with col_ctrl1:
+        col_play, col_prev, col_next, col_reset, col_csv, col_speed = st.columns([1, 0.8, 0.8, 1, 1, 2.5])
+        with col_play:
             if st.session_state.playback_playing:
                 if st.button("Pause", use_container_width=True, type="primary"):
                     st.session_state.playback_playing = False
@@ -896,22 +1098,155 @@ with tab_playback:
                 if st.button("Play", use_container_width=True, type="primary"):
                     st.session_state.playback_playing = True
                     safe_rerun()
-        with col_ctrl2:
+
+        with col_prev:
+            if st.button("Step Back", use_container_width=True, disabled=(k == 0), help="Step backward one epoch."):
+                st.session_state.playback_playing = False
+                history_keys = [
+                    "playback_history_t", "playback_history_rb", "playback_history_gnss", "playback_history_master",
+                    "playback_history_utc", "playback_history_sats", "playback_history_mode",
+                    "playback_history_bias_est", "playback_history_drift_est",
+                    "playback_history_sigma", "playback_history_R", "playback_history_K",
+                    "playback_history_true_time", "playback_history_gnss_time",
+                    "playback_history_rubidium_time", "playback_history_disciplined_time",
+                    "playback_history_kf_x", "playback_history_kf_P",
+                    "playback_history_rb_phase_rw", "playback_history_rb_freq_offset",
+                    "playback_history_gnss_prop_err"
+                ]
+                if len(st.session_state.playback_history_t) > 1:
+                    for h_key in history_keys:
+                        if h_key in st.session_state and len(st.session_state[h_key]) > 0:
+                            st.session_state[h_key].pop()
+                    
+                    new_k = max(0, k - 1)
+                    st.session_state.playback_epoch = new_k
+                    st.session_state.playback_slider = new_k
+                    
+                    # Reconstruct states & environment for display
+                    raw_sats = total_count[new_k]
+                    sats = max(0, int(raw_sats * sat_scale))
+                    gps_sats = max(0, int(gps_count[new_k] * sat_scale))
+                    gal_sats = max(0, int(galileo_count[new_k] * sat_scale))
+                    glo_sats = max(0, int(glonass_count[new_k] * sat_scale))
+                    sbas_sats = max(0, int(sbas_count[new_k] * sat_scale))
+                    
+                    st.session_state.playback_kf_x = st.session_state.playback_history_kf_x[-1].copy()
+                    st.session_state.playback_kf_P = st.session_state.playback_history_kf_P[-1].copy()
+                    st.session_state.playback_rb_phase_rw = st.session_state.playback_history_rb_phase_rw[-1]
+                    st.session_state.playback_rb_freq_offset = st.session_state.playback_history_rb_freq_offset[-1]
+                    st.session_state.playback_gnss_prop_err = st.session_state.playback_history_gnss_prop_err[-1]
+                    
+                    dt_step = float(dt)
+                    Q_matrix = build_Q_matrix(dt_step)
+                    
+                    if sats < 4:
+                        mode_str = "HOLDOVER"
+                        R_k = 1e12
+                    else:
+                        if sats < 8:
+                            mode_str = "DEGRADED"
+                        else:
+                            mode_str = "TRACKING"
+                        unscaled_avg = np.mean(total_count)
+                        unscaled_raw_mults = np.sqrt(unscaled_avg / np.maximum(1.0, np.array(total_count)))
+                        mean_mult = np.mean(unscaled_raw_mults)
+                        raw_mult = np.sqrt(unscaled_avg / max(1.0, sats))
+                        multiplier = raw_mult / (mean_mult if mean_mult > 0 else 1.0)
+                        R_k = (gnss_meas * multiplier) ** 2
+                        
+                    st.session_state.last_rendered_vals = {
+                        "t": st.session_state.playback_history_t[-1],
+                        "rb_err": st.session_state.playback_history_rb[-1],
+                        "gnss_err": st.session_state.playback_history_gnss[-1],
+                        "master_err": st.session_state.playback_history_master[-1],
+                        "sats": sats,
+                        "gps_sats": gps_sats,
+                        "gal_sats": gal_sats,
+                        "glo_sats": glo_sats,
+                        "sbas_sats": sbas_sats,
+                        "mode_str": mode_str,
+                        "bias_est": st.session_state.playback_kf_x[0, 0],
+                        "drift_est": st.session_state.playback_kf_x[1, 0],
+                        "P_bias": st.session_state.playback_kf_P[0, 0],
+                        "P": st.session_state.playback_kf_P,
+                        "Q": Q_matrix,
+                        "R_k": R_k,
+                        "K_bias": st.session_state.playback_history_K[-1]
+                    }
+                else:
+                    st.session_state.playback_epoch = 0
+                    st.session_state.playback_slider = 0
+                    for h_key in history_keys:
+                        st.session_state[h_key] = []
+                    st.session_state.playback_kf_x = np.array([[rb_bias - gnss_bias], [0.0]])
+                    st.session_state.playback_kf_P = np.array([[1e-6, 0.0], [0.0, 1e-12]])
+                    st.session_state.playback_rb_freq_offset = 0.0
+                    st.session_state.playback_rb_phase_rw = 0.0
+                    st.session_state.playback_gnss_prop_err = 0.0
+                    if "playback_receiver" in st.session_state:
+                        st.session_state.playback_receiver.reset(GLOBAL_RANDOM_SEED)
+                
+                safe_rerun()
+
+        with col_next:
+            if st.button("Step Forward", use_container_width=True, disabled=(k >= total_epochs - 1), help="Step forward one epoch."):
+                st.session_state.playback_playing = False
+                new_k = min(total_epochs - 1, k + 1)
+                st.session_state.playback_epoch = new_k
+                st.session_state.playback_slider = new_k
+                st.session_state.playback_manual_step = True
+                safe_rerun()
+
+        with col_reset:
             if st.button("Reset", use_container_width=True):
                 st.session_state.playback_epoch = 0
                 st.session_state.playback_slider = 0
-                st.session_state.playback_history_t = []
-                st.session_state.playback_history_rb = []
-                st.session_state.playback_history_gnss = []
-                st.session_state.playback_history_master = []
+                st.session_state.playback_should_increment = False
+                for h_key in history_keys:
+                    st.session_state[h_key] = []
                 st.session_state.playback_kf_x = np.array([[rb_bias - gnss_bias], [0.0]])
                 st.session_state.playback_kf_P = np.array([[1e-6, 0.0], [0.0, 1e-12]])
                 st.session_state.playback_rb_freq_offset = 0.0
                 st.session_state.playback_rb_phase_rw = 0.0
                 st.session_state.playback_gnss_prop_err = 0.0
                 st.session_state.playback_playing = False
+                if "playback_receiver" in st.session_state:
+                    st.session_state.playback_receiver.reset(GLOBAL_RANDOM_SEED)
                 safe_rerun()
-        with col_ctrl3:
+
+        with col_csv:
+            if len(st.session_state.playback_history_t) > 0:
+                # Compile dataframe
+                df_telemetry = pd.DataFrame({
+                    "Epoch Time (s)": st.session_state.playback_history_t,
+                    "UTC Timestamp": st.session_state.playback_history_utc,
+                    "True Time": st.session_state.playback_history_true_time,
+                    "GNSS Time": st.session_state.playback_history_gnss_time,
+                    "Rubidium Time": st.session_state.playback_history_rubidium_time,
+                    "Disciplined Time": st.session_state.playback_history_disciplined_time,
+                    "Rubidium Error (ns)": np.array(st.session_state.playback_history_rb) * 1e9,
+                    "GNSS Error (ns)": np.array(st.session_state.playback_history_gnss) * 1e9,
+                    "Disciplined Master Clock Error (ns)": np.array(st.session_state.playback_history_master) * 1e9,
+                    "Visible Satellites": st.session_state.playback_history_sats,
+                    "Receiver Mode": st.session_state.playback_history_mode,
+                    "Bias Estimate (ns)": st.session_state.playback_history_bias_est,
+                    "Drift Estimate (ps/s)": st.session_state.playback_history_drift_est,
+                    "3σ Uncertainty (ns)": st.session_state.playback_history_sigma,
+                    "Current R (ns²)": st.session_state.playback_history_R,
+                    "Kalman Gain": st.session_state.playback_history_K
+                })
+                csv_data = df_telemetry.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download CSV",
+                    data=csv_data,
+                    file_name=f"gnssdo_telemetry_epoch_{k}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.button("Download CSV", disabled=True, use_container_width=True, help="Run simulation to generate telemetry data first.")
+
+        with col_speed:
             speed_interval = st.slider(
                 "Step Delay (s)",
                 min_value=0.1,
@@ -936,16 +1271,16 @@ with tab_playback:
             st.session_state.playback_epoch = seek_epoch
             st.session_state.playback_playing = False  # Pause playback on seek to prevent snaps
             # Clear continuous history to prevent jumps on the plot
-            st.session_state.playback_history_t = []
-            st.session_state.playback_history_rb = []
-            st.session_state.playback_history_gnss = []
-            st.session_state.playback_history_master = []
+            for h_key in history_keys:
+                st.session_state[h_key] = []
             # Reset running states
             st.session_state.playback_kf_x = np.array([[rb_bias - gnss_bias], [0.0]])
             st.session_state.playback_kf_P = np.array([[1e-6, 0.0], [0.0, 1e-12]])
             st.session_state.playback_rb_freq_offset = 0.0
             st.session_state.playback_rb_phase_rw = 0.0
             st.session_state.playback_gnss_prop_err = 0.0
+            if "playback_receiver" in st.session_state:
+                st.session_state.playback_receiver.reset(GLOBAL_RANDOM_SEED)
             safe_rerun()
 
         # Display progress info
@@ -967,55 +1302,34 @@ with tab_playback:
             st.warning("Reached the end of the RINEX data epochs. Please reset the simulation.")
             k = total_epochs - 1
 
-        # Only run calculation if playing or if we have no history yet
-        if st.session_state.playback_playing or len(st.session_state.playback_history_t) == 0:
-            # ── 1. Simulate Rubidium clock step ──
-            freq_step = 0.0 if k == 0 else np.random.default_rng().normal(0, rb_rw_step)
+        # Only run calculation if playing, if manual step was requested, or if we have no history yet
+        if st.session_state.playback_playing or st.session_state.get("playback_manual_step", False) or len(st.session_state.playback_history_t) == 0:
+            # ── 1. Simulate Rubidium clock step (Reproducible with Seed) ──
+            freq_step = 0.0 if k == 0 else np.random.default_rng(GLOBAL_RANDOM_SEED + k).normal(0, rb_rw_step)
             st.session_state.playback_rb_freq_offset += freq_step
             st.session_state.playback_rb_phase_rw += st.session_state.playback_rb_freq_offset * dt_step
             
             aging_k = 0.5 * rb_aging * (k * dt_step)**2
-            white_noise_k = np.random.default_rng().normal(0, rb_noise)
+            white_noise_k = np.random.default_rng(GLOBAL_RANDOM_SEED + k + 100000).normal(0, rb_noise)
             rubidium_error_k = rb_bias + st.session_state.playback_rb_phase_rw + aging_k + white_noise_k
             
-            # ── 2. Constellation Satellite Count ──
-            sats = total_count[k]
-            gps_sats = gps_count[k]
-            gal_sats = galileo_count[k]
-            glo_sats = glonass_count[k]
-            sbas_sats = sbas_count[k]
+            # ── 2. Simulate GNSS error step using Receiver Abstraction ──
+            res = st.session_state.playback_receiver.measure(k * dt_step, dt_step)
+            gnss_error_k = res["gnss_error"]
+            sats = res["sat_count"]
+            gps_sats = res["gps_count"]
+            gal_sats = res["galileo_count"]
+            glo_sats = res["glonass_count"]
+            sbas_sats = res["sbas_count"]
+            R_k = res["R"]
             
-            # ── 3. Determine Mode & Dynamic R-value ──
-            if sats < 8:
+            if sats < 4:
                 mode_str = "HOLDOVER"
-                R_k = (100e-9)**2  # Out of lock, use fallback
-            elif sats < 15:
+            elif sats < 8:
                 mode_str = "DEGRADED"
-                R_k = (100e-9)**2
             else:
                 mode_str = "TRACKING"
-                if sats > 30:
-                    R_k = (30e-9)**2
-                elif sats > 20:
-                    R_k = (50e-9)**2
-                else:
-                    R_k = (100e-9)**2
-                    
-            # ── 4. Simulate GNSS error step ──
-            sat_clock_k = np.random.default_rng().normal(0, gnss_sat)
-            if use_gauss_markov:
-                beta = 1.0 / 3600.0
-                driving_noise_std = gnss_prop * np.sqrt(2.0 * beta * dt_step)
-                prop_step = np.random.default_rng().normal(0, driving_noise_std)
-                if k == 0:
-                    st.session_state.playback_gnss_prop_err = np.random.default_rng().normal(0, gnss_prop)
-                else:
-                    st.session_state.playback_gnss_prop_err = (1.0 - beta * dt_step) * st.session_state.playback_gnss_prop_err + prop_step
-            else:
-                st.session_state.playback_gnss_prop_err = np.random.default_rng().normal(0, gnss_prop)
-                
-            meas_noise_k = np.random.default_rng().normal(0, np.sqrt(R_k))
-            gnss_error_k = gnss_bias + sat_clock_k + st.session_state.playback_gnss_prop_err + meas_noise_k
+
             
             # ── 5. Kalman Filter Prediction & Propagation ──
             x = st.session_state.playback_kf_x
@@ -1039,11 +1353,13 @@ with tab_playback:
                 
                 x = x_pred + K * innov_k
                 P = (np.eye(2) - K @ H) @ P_pred
+                K_bias = K[0, 0]
             else:
                 # Holdover: state propagates with prediction, no measurement update
                 x = x_pred
                 P = P_pred
                 innov_k = np.nan
+                K_bias = 0.0
                 
             # Disciplined master clock error
             master_error_k = rubidium_error_k - x[0, 0]
@@ -1053,16 +1369,60 @@ with tab_playback:
             st.session_state.playback_kf_P = P
             
             # Save history (limit to last 1000 steps to conserve memory)
+            epoch_dt = times_analysis[k % len(times_analysis)]
+            utc_str = epoch_dt.strftime('%Y-%m-%d %H:%M:%S.%f') + " UTC"
+            bias_ns = x[0, 0] * 1e9
+            drift_ps = x[1, 0] * 1e12
+            sigma_ns = 3.0 * np.sqrt(P[0, 0]) * 1e9
+            R_ns2 = R_k * 1e18
+
             st.session_state.playback_history_t.append(k * dt_step)
             st.session_state.playback_history_rb.append(rubidium_error_k)
             st.session_state.playback_history_gnss.append(gnss_error_k)
             st.session_state.playback_history_master.append(master_error_k)
+            st.session_state.playback_history_utc.append(utc_str)
+            st.session_state.playback_history_sats.append(sats)
+            st.session_state.playback_history_mode.append(mode_str)
+            st.session_state.playback_history_bias_est.append(bias_ns)
+            st.session_state.playback_history_drift_est.append(drift_ps)
+            st.session_state.playback_history_sigma.append(sigma_ns)
+            st.session_state.playback_history_R.append(R_ns2)
+            st.session_state.playback_history_K.append(K_bias)
+            st.session_state.playback_history_true_time.append(format_telemetry_time(epoch_dt, time_only=True) + " UTC")
+            st.session_state.playback_history_gnss_time.append(format_telemetry_time(epoch_dt, gnss_error_k, time_only=True) + " UTC")
+            st.session_state.playback_history_rubidium_time.append(format_telemetry_time(epoch_dt, rubidium_error_k, time_only=True) + " UTC")
+            st.session_state.playback_history_disciplined_time.append(format_telemetry_time(epoch_dt, master_error_k, time_only=True) + " UTC")
+            st.session_state.playback_history_kf_x.append(x.copy())
+            st.session_state.playback_history_kf_P.append(P.copy())
+            st.session_state.playback_history_rb_phase_rw.append(st.session_state.playback_rb_phase_rw)
+            st.session_state.playback_history_rb_freq_offset.append(st.session_state.playback_rb_freq_offset)
+            st.session_state.playback_history_gnss_prop_err.append(st.session_state.playback_gnss_prop_err)
             
             if len(st.session_state.playback_history_t) > 1000:
                 st.session_state.playback_history_t.pop(0)
                 st.session_state.playback_history_rb.pop(0)
                 st.session_state.playback_history_gnss.pop(0)
                 st.session_state.playback_history_master.pop(0)
+                st.session_state.playback_history_utc.pop(0)
+                st.session_state.playback_history_sats.pop(0)
+                st.session_state.playback_history_mode.pop(0)
+                st.session_state.playback_history_bias_est.pop(0)
+                st.session_state.playback_history_drift_est.pop(0)
+                st.session_state.playback_history_sigma.pop(0)
+                st.session_state.playback_history_R.pop(0)
+                st.session_state.playback_history_K.pop(0)
+                st.session_state.playback_history_true_time.pop(0)
+                st.session_state.playback_history_gnss_time.pop(0)
+                st.session_state.playback_history_rubidium_time.pop(0)
+                st.session_state.playback_history_disciplined_time.pop(0)
+                st.session_state.playback_history_kf_x.pop(0)
+                st.session_state.playback_history_kf_P.pop(0)
+                st.session_state.playback_history_rb_phase_rw.pop(0)
+                st.session_state.playback_history_rb_freq_offset.pop(0)
+                st.session_state.playback_history_gnss_prop_err.pop(0)
+
+            # Reset manual step flag
+            st.session_state.playback_manual_step = False
                 
             # Store current values for rendering (to prevent display updates while paused from recalculating)
             st.session_state.last_rendered_vals = {
@@ -1080,7 +1440,9 @@ with tab_playback:
                 "drift_est": x[1, 0],
                 "P_bias": P[0, 0],
                 "P": P,
-                "Q": Q_matrix
+                "Q": Q_matrix,
+                "R_k": R_k,
+                "K_bias": K_bias
             }
 
         # Fetch last calculated parameters for rendering
@@ -1187,6 +1549,14 @@ with tab_playback:
             drift_ps = vals["drift_est"] * 1e12
             sigma_ns = 3.0 * np.sqrt(vals["P_bias"]) * 1e9
             
+            R_k = vals.get("R_k", 0.0)
+            if R_k >= 1e10:
+                R_str = "Lock Loss (∞)"
+            else:
+                R_str = f"{np.sqrt(R_k)*1e9:.1f} ns ({R_k*1e18:.0f} ns²)"
+                
+            K_bias = vals.get("K_bias", 0.0)
+            
             if vals["mode_str"] == "TRACKING":
                 mode_color = "#059669" # green
             elif vals["mode_str"] == "DEGRADED":
@@ -1208,6 +1578,14 @@ with tab_playback:
                 <div class="telemetry-row">
                     <span class="telemetry-label">3σ Uncertainty</span>
                     <span class="telemetry-value">±{sigma_ns:.1f} ns</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Current R</span>
+                    <span class="telemetry-value">{R_str}</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Kalman Gain</span>
+                    <span class="telemetry-value">{K_bias:.4f}</span>
                 </div>
                 <div class="telemetry-row">
                     <span class="telemetry-label">Mode</span>
@@ -1240,23 +1618,36 @@ with tab_playback:
             """, unsafe_allow_html=True)
             
         with col_row2_right:
-            # Live Chart
+            # Live Charts
             if len(st.session_state.playback_history_t) > 1:
+                st.markdown("##### Live Clock Errors (relative to True Time)")
                 fig_playback = plot_live_playback_errors(
                     st.session_state.playback_history_t,
                     st.session_state.playback_history_gnss,
-                    st.session_state.playback_history_master
+                    st.session_state.playback_history_master,
+                    st.session_state.playback_history_rb
                 )
                 st.pyplot(fig_playback)
                 plt.close(fig_playback)
+                
+                st.markdown("##### Live UTC Clock Times")
+                fig_times = plot_live_playback_times(
+                    st.session_state.playback_history_t,
+                    st.session_state.playback_history_gnss,
+                    st.session_state.playback_history_master,
+                    st.session_state.playback_history_rb,
+                    times_analysis,
+                    k
+                )
+                st.pyplot(fig_times)
+                plt.close(fig_times)
             else:
-                st.info("Simulation started. Live jitter telemetry chart will render once data accumulates.")
+                st.info("Simulation started. Live telemetry charts will render once data accumulates.")
 
         # ── 9. Handle Loop Sleep and Rerun ──
         if st.session_state.playback_playing:
             time.sleep(speed_interval)
-            st.session_state.playback_epoch += 1
-            st.session_state.playback_slider = st.session_state.playback_epoch
+            st.session_state.playback_should_increment = True
             safe_rerun()
 
     run_playback_panel()

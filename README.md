@@ -114,6 +114,24 @@ graph TD
 
 ---
 
+## GNSS Timing Validation Dataset
+
+The `AB04` RINEX file is useful for constellation replay, but it is not enough to prove GNSSDO timing accuracy because it has no independent clock-truth channel.
+
+For actual timing validation, use the `ALGO` paired dataset:
+
+- Observation file: `GNSS_DATA/ALGO00CAN_R_20251000000_01D_30S_MO.crx.gz`
+- Clock truth file: `GNSS_DATA/ESA0OPSFIN_20251000000_01D_30S_CLK.CLK.gz`
+- Extracted truth CSV: `data/algo_receiver_clock_truth_2025100.csv`
+- Station: `ALGO`
+- Date: `2025-04-10`
+- Truth samples: `2,880` epochs at `30 s`
+- Truth field: `receiver_clock_offset_ns`
+
+To check the GNSSDO, align your output by `epoch_utc` and compare its GNSS or disciplined master-clock time error against `receiver_clock_offset_ns`.
+
+---
+
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for details.

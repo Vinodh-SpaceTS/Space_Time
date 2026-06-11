@@ -33,18 +33,23 @@ def parse_receiver_clock_offsets(clk_gz_path, station):
             minute = int(parts[6])
             second = float(parts[7])
             sec_whole = int(second)
-            microsecond = int(round((second - sec_whole) * 1_000_000))
+            
+            # Simple RINEX Y2K handling
+            yr = 2000 + year if year < 80 else year
+            if yr < 100:
+                yr += 1900
+            
+            nsec = int(round((second - sec_whole) * 1e9))
+            if nsec < 0:
+                nsec = 0
 
-            epoch = datetime(
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                sec_whole,
-                microsecond,
-                tzinfo=timezone.utc,
-            )
+            # Construct Epoch in GPST (GPS Time scale - standard for RINEX clock files)
+            from hifitime import Epoch, TimeScale
+            epoch_gps = Epoch.from_gregorian(yr, month, day, hour, minute, sec_whole, nsec, TimeScale.GPST)
+            # Convert to UTC
+            epoch_utc = epoch_gps.to_time_scale(TimeScale.UTC)
+            epoch = epoch_utc.to_datetime()
+
 
             offset_s = float(parts[9])
             sigma_s = float(parts[10]) if len(parts) > 10 else None

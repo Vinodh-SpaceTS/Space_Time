@@ -1,2 +1,5 @@
 local_file,station,date_utc,format,source_agency,receiver,antenna,epochs,sample_interval_s,first_epoch_utc,first_obs_header_time,leap_seconds,validation_use
 data/ab041000.25o,AB04,2025-04-10,RINEX 2.11 mixed observation,UNAVCO,SEPT POLARX5 5.5.0,TRM59800.99 SCIT,5760,15,2025-04-09 23:59:42,2025-04-10 00:00:00 GPS,18,Historical constellation replay and GNSSDO live playback validation
+GNSS_DATA/ALGO00CAN_R_20251000000_01D_30S_MO.crx.gz,ALGO,2025-04-10,RINEX 3 Hatanaka-compressed mixed observation,SOPAC/IGS,Unknown,Unknown,2880,30,2025-04-10 00:00:00,2025-04-10 00:00:00 UTC,18,Raw same-station GNSS observation data paired with receiver-clock truth
+GNSS_DATA/ESA0OPSFIN_20251000000_01D_30S_CLK.CLK.gz,ALGO,2025-04-10,RINEX CLK 3.02 receiver clock product,ESA/IGS,Not applicable,Not applicable,2880,30,2025-04-10 00:00:00,2025-04-10 00:00:00 UTC,18,Independent high-accuracy receiver clock offset truth
+data/algo_receiver_clock_truth_2025100.csv,ALGO,2025-04-10,CSV extracted from RINEX CLK,ESA/IGS,Not applicable,Not applicable,2880,30,2025-04-10 00:00:00,2025-04-10 00:00:00 UTC,18,Epoch-aligned truth table for GNSSDO error validation
