@@ -1,6 +1,6 @@
-# Space-Time Synchronization: GNSSDO Simulation & Telemetry
+# GNSSDO Digital Twin: Simulation, Estimation & Telemetry
 
-A high-fidelity hardware-in-the-loop (HIL) emulation and diagnostic dashboard for Global Navigation Satellite System Disciplined Oscillators (GNSSDO). This tool simulates the synchronization of a local atomic standard (Rubidium oscillator) with GPS/Galileo/GLONASS reference time, using a two-state Kalman filter driven by real-world satellite observation data (RINEX).
+A high-fidelity Digital Twin, hardware-in-the-loop (HIL) emulation, and diagnostic dashboard for Global Navigation Satellite System Disciplined Oscillators (GNSSDO). This tool simulates the synchronization of a local atomic standard (Rubidium oscillator) with GPS/Galileo/GLONASS reference time, using a two-state Kalman filter driven by real-world satellite observation data (RINEX).
 
 The dashboard is built entirely with Python, Streamlit, NumPy, FilterPy, and Matplotlib.
 
@@ -8,7 +8,13 @@ The dashboard is built entirely with Python, Streamlit, NumPy, FilterPy, and Mat
 
 ## Key Features
 
-### 1. Real-Time Telemetry & Diagnostics
+### 1. Architectural & Timing Correctness
+- **Receiver Abstraction Layer**: Exposes a clean `BaseReceiver` interface to support simulated inputs (`SimulatedReceiver`) or physical receiver modules (ZED-F9P, NTRIP) with zero core changes.
+- **GPS-to-UTC Leap Second Correction**: Handles GPST-to-UTC conversion (accounting for the 18-second shift) using the `hifitime` library for precise alignment with external timing products.
+- **Filter Divergence Detection**: Actively monitors innovation ratio metrics ($|s|/\sqrt{S}$) to detect and alert users if the state estimate diverges.
+- **Configuration Validation**: Startup bounds validator checking all configuration parameters to prevent silent corruption or unphysical simulations.
+
+### 2. Real-Time Telemetry & Diagnostics
 - **Disciplined Master Clock Phase Error**: Displays the phase offset of the disciplined system vs. raw GNSS and free-running Rubidium time series.
 - **Kalman Filter State Tracking**: Visualizes estimated clock bias and state variances (3$\sigma$ confidence bounds).
 - **Frequency Drift Estimation**: Charts estimated frequency drift rate in real-time.
@@ -104,6 +110,7 @@ graph TD
 ## File Structure
 
 - [app.py](file:///d:/CLOCK_SIM/app.py): Main dashboard application layout, telemetry components, styles, and control loops.
+- [receivers/](file:///d:/CLOCK_SIM/receivers/): Modular receiver interface library (`base_receiver.py`, `simulated_receiver.py`).
 - [models/clock_model.py](file:///d:/CLOCK_SIM/models/clock_model.py): Simulation of Rubidium clock phase errors.
 - [models/gnss_time_model.py](file:///d:/CLOCK_SIM/models/gnss_time_model.py): GNSS time signal errors, atmospheric propagation delays, and measurement noise.
 - [models/kalman_filter.py](file:///d:/CLOCK_SIM/models/kalman_filter.py): 2-state Kalman filter implementation using FilterPy.
@@ -111,6 +118,16 @@ graph TD
 - [analysis/allan_deviation.py](file:///d:/CLOCK_SIM/analysis/allan_deviation.py): Calculations for Allan Deviation and stability analysis.
 - [config.py](file:///d:/CLOCK_SIM/config.py): Global configuration options, paths, and default parameters.
 - [data/](file:///d:/CLOCK_SIM/data/): Folder containing RINEX observation files (e.g. `ab041000.25o`).
+- [tests/](file:///d:/CLOCK_SIM/tests/): Unit tests for the clock, receiver, conversion, and filter modules.
+
+---
+
+## Running Unit Tests
+
+To run the full unit testing suite, execute:
+```bash
+pytest tests/
+```
 
 ---
 
