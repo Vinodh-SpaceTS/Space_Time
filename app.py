@@ -57,31 +57,70 @@ st.set_page_config(
 # Add custom styled components
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
     
     html, body, [data-testid="stAppViewContainer"], .stApp {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Sidebar styling refinement */
+    /* Sidebar styling refinement - dark blue slate corporate style */
     [data-testid="stSidebar"] {
-        border-right: 1px solid #cbd5e1;
+        background-color: #0f172a !important;
+        border-right: 1px solid #1e293b !important;
+    }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4 {
+        color: #f1f5f9 !important;
+    }
+    [data-testid="stSidebar"] details {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+        margin-bottom: 10px !important;
+    }
+    [data-testid="stSidebar"] details summary {
+        color: #f8fafc !important;
+        font-weight: 600 !important;
     }
     
-    /* Custom metric card */
+    /* Streamlit custom styled tabs - modern pill buttons */
+    button[data-baseweb="tab"] {
+        font-family: 'Inter', sans-serif !important;
+        font-size: 0.95rem !important;
+        font-weight: 500 !important;
+        color: #475569 !important;
+        background-color: transparent !important;
+        border-radius: 6px !important;
+        padding: 8px 16px !important;
+        margin: 0 4px !important;
+        transition: all 0.2s ease !important;
+        border: 1px solid transparent !important;
+    }
+    button[data-baseweb="tab"]:hover {
+        color: #4f46e5 !important;
+        background-color: #f1f5f9 !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #4f46e5 !important;
+        background-color: #eef2ff !important;
+        border: 1px solid #c7d2fe !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Custom metric card - premium design with hover shadow */
     .metric-card {
-        background: #ffffff;
+        background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
         border: 1px solid #e2e8f0;
-        border-radius: 12px;
+        border-radius: 14px;
         padding: 18px 12px;
         text-align: center;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
         margin-bottom: 10px;
-        transition: transform 0.2s ease, border-color 0.2s ease;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
     .metric-card:hover {
-        transform: translateY(-2px);
-        border-color: rgba(99, 102, 241, 0.4);
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(99, 102, 241, 0.1);
+        border-color: #c7d2fe;
     }
     .metric-value {
         font-size: 2.2rem;
@@ -97,7 +136,7 @@ st.markdown("""
         font-weight: 500;
     }
     
-    /* Custom colors for values to override global black color */
+    /* Custom colors for values */
     .value-blue { color: #1d4ed8 !important; }
     .value-green { color: #047857 !important; }
     .value-orange { color: #c2410c !important; }
@@ -108,12 +147,17 @@ st.markdown("""
     .telemetry-card {
         background-color: #ffffff;
         border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 20px;
+        border-radius: 14px;
+        padding: 22px;
         color: #0f172a;
         font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.02);
         margin-bottom: 15px;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .telemetry-card:hover {
+        border-color: #cbd5e1;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.04);
     }
     .telemetry-header {
         border-bottom: 1px solid #f1f5f9;
@@ -153,6 +197,81 @@ st.markdown("""
         color: #0f172a;
         font-weight: 600;
     }
+
+    /* Rackmount hardware clock style */
+    .rackmount-clock {
+        background: radial-gradient(circle at center, #0f172a, #020617);
+        border: 2px solid #334155;
+        border-radius: 10px;
+        padding: 20px;
+        color: #00ff66;
+        font-family: 'Space Mono', 'SFMono-Regular', Consolas, monospace;
+        box-shadow: inset 0 0 20px rgba(0, 255, 102, 0.1), 0 6px 12px rgba(0, 0, 0, 0.15);
+        text-shadow: 0 0 10px rgba(0, 255, 102, 0.6);
+        text-align: center;
+        position: relative;
+        margin-bottom: 25px;
+    }
+    .rackmount-header {
+        color: #94a3b8;
+        font-size: 0.75rem;
+        letter-spacing: 0.25em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+        text-shadow: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+    }
+    .rackmount-value {
+        font-size: 2.6rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        margin: 5px 0;
+    }
+    .rackmount-led {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .led-green {
+        background-color: #10b981;
+        box-shadow: 0 0 8px #10b981, 0 0 15px #10b981;
+        animation: led-pulse-green 1.5s infinite alternate;
+    }
+    .led-orange {
+        background-color: #f59e0b;
+        box-shadow: 0 0 8px #f59e0b, 0 0 15px #f59e0b;
+        animation: led-pulse-orange 1.5s infinite alternate;
+    }
+    .led-red {
+        background-color: #ef4444;
+        box-shadow: 0 0 8px #ef4444, 0 0 15px #ef4444;
+        animation: led-pulse-red 0.5s infinite alternate;
+    }
+    .led-blue {
+        background-color: #3b82f6;
+        box-shadow: 0 0 8px #3b82f6, 0 0 15px #3b82f6;
+        animation: led-pulse-blue 1.5s infinite alternate;
+    }
+    @keyframes led-pulse-green {
+        from { opacity: 0.4; box-shadow: 0 0 2px #10b981; }
+        to { opacity: 1; box-shadow: 0 0 12px #10b981, 0 0 20px #10b981; }
+    }
+    @keyframes led-pulse-orange {
+        from { opacity: 0.4; box-shadow: 0 0 2px #f59e0b; }
+        to { opacity: 1; box-shadow: 0 0 12px #f59e0b, 0 0 20px #f59e0b; }
+    }
+    @keyframes led-pulse-red {
+        from { opacity: 0.3; box-shadow: 0 0 2px #ef4444; }
+        to { opacity: 1; box-shadow: 0 0 14px #ef4444, 0 0 24px #ef4444; }
+    }
+    @keyframes led-pulse-blue {
+        from { opacity: 0.4; box-shadow: 0 0 2px #3b82f6; }
+        to { opacity: 1; box-shadow: 0 0 12px #3b82f6, 0 0 20px #3b82f6; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -177,7 +296,12 @@ validate_config()
 # ====================================================
 # TITLE BLOCK
 # ====================================================
-st.title("GNSSDO Synchronization Telemetry")
+st.markdown("""
+<div style="background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%); padding: 30px; border-radius: 14px; margin-bottom: 25px; box-shadow: 0 4px 20px rgba(79, 70, 229, 0.15); text-align: center;">
+    <h1 style="color: #ffffff; margin: 0; font-weight: 700; font-size: 2.25rem; letter-spacing: -0.02em; font-family: 'Inter', sans-serif;">GNSSDO Digital Twin Console</h1>
+    <p style="color: #e0e7ff; margin: 8px 0 0 0; font-size: 1.05rem; font-weight: 400; opacity: 0.9; font-family: 'Inter', sans-serif;">Hardware Emulation & Time Synchronization Diagnostics Platform</p>
+</div>
+""", unsafe_allow_html=True)
 
 # ====================================================
 # SCENARIO SELECTOR
@@ -411,10 +535,29 @@ with tab_telemetry:
     final_offset = master_error[-1]
     final_utc_str = format_telemetry_time(epoch_end_dt, final_offset)
     
+    if np.any(diverged_flags):
+        clock_color = "#ef4444"
+        glow_color = "rgba(239, 68, 68, 0.6)"
+        led_class = "led-red"
+        status_label = "DIVERGED"
+    elif outage_enabled:
+        clock_color = "#f59e0b"
+        glow_color = "rgba(245, 158, 11, 0.6)"
+        led_class = "led-orange"
+        status_label = "HOLDOVER SIMULATION"
+    else:
+        clock_color = "#00ff66"
+        glow_color = "rgba(0, 255, 102, 0.6)"
+        led_class = "led-green"
+        status_label = "TRACKING ACTIVE"
+
     st.markdown(f"""
-    <div class="telemetry-card" style="text-align: center; border-color: #e2e8f0; background-color: #f8fafc; margin-bottom: 20px;">
-        <div class="telemetry-header" style="color: #4f46e5; font-size: 1.1rem; border-bottom: none; margin-bottom: 0;">GNSSDO MASTER CLOCK (UTC)</div>
-        <div class="telemetry-value-large" style="font-size: 2.8rem; color: #1e1b4b; margin: 10px 0;">{final_utc_str}</div>
+    <div class="rackmount-clock" style="color: {clock_color}; box-shadow: inset 0 0 20px {glow_color}1a, 0 6px 12px rgba(0, 0, 0, 0.15); text-shadow: 0 0 10px {glow_color}; border-color: {clock_color}55;">
+        <div class="rackmount-header">
+            <span class="rackmount-led {led_class}"></span>
+            GNSSDO MASTER CLOCK — {status_label}
+        </div>
+        <div class="rackmount-value">{final_utc_str}</div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -1664,11 +1807,32 @@ with tab_playback:
         
         # ── 8. Render UI Panels ──
         
-        # Top Row: Large UTC clock card (No Status Badge, light styled)
+        # Top Row: Large UTC clock card (No Status Badge, hardware styled)
+        mode_upper = vals["mode_str"].upper()
+        if "TRACKING" in mode_upper:
+            clock_color = "#00ff66"  # glowing neon green
+            glow_color = "rgba(0, 255, 102, 0.6)"
+            led_class = "led-green"
+        elif "HOLDOVER" in mode_upper:
+            clock_color = "#f59e0b"  # glowing orange/amber
+            glow_color = "rgba(245, 158, 11, 0.6)"
+            led_class = "led-orange"
+        elif "DIVERGED" in mode_upper:
+            clock_color = "#ef4444"  # blinking neon red
+            glow_color = "rgba(239, 68, 68, 0.6)"
+            led_class = "led-red"
+        else:
+            clock_color = "#3b82f6"  # glowing neon blue (warmup or other)
+            glow_color = "rgba(59, 130, 246, 0.6)"
+            led_class = "led-blue"
+
         st.markdown(f"""
-        <div class="telemetry-card" style="text-align: center; border-color: #e2e8f0; background-color: #f8fafc;">
-            <div class="telemetry-header" style="color: #4f46e5; font-size: 1.1rem; border-bottom: none; margin-bottom: 0;">GNSSDO MASTER CLOCK</div>
-            <div class="telemetry-value-large" style="font-size: 2.8rem; color: #1e1b4b; margin: 10px 0;">{true_time_str}</div>
+        <div class="rackmount-clock" style="color: {clock_color}; box-shadow: inset 0 0 20px {glow_color}1a, 0 6px 12px rgba(0, 0, 0, 0.15); text-shadow: 0 0 10px {glow_color}; border-color: {clock_color}55;">
+            <div class="rackmount-header">
+                <span class="rackmount-led {led_class}"></span>
+                GNSSDO MASTER CLOCK — {mode_upper}
+            </div>
+            <div class="rackmount-value">{true_time_str}</div>
         </div>
         """, unsafe_allow_html=True)
         
